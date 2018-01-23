@@ -1,4 +1,4 @@
-import struct
+from struct import pack, unpack
 import io
 import datetime
 import re
@@ -786,7 +786,7 @@ class RdbParser(object):
         buffer = None
         if record_buffer:
             # prepand the buffer with REDIS_RDB_TYPE_MODULE_2 type
-            buffer = struct.pack('B', REDIS_RDB_TYPE_MODULE_2) + iowrapper.get_recorded_buffer()
+            buffer = pack('B', REDIS_RDB_TYPE_MODULE_2) + iowrapper.get_recorded_buffer()
             iowrapper.stop_recording()
         self._callback.end_module(self._key, buffer_size=iowrapper.get_recorded_size(), buffer=buffer)
 
@@ -923,42 +923,42 @@ def to_datetime(usecs_since_epoch):
     return dt + delta
     
 def read_signed_char(f) :
-    return struct.unpack('b', f.read(1))[0]
+    return unpack('b', f.read(1))[0]
     
 def read_unsigned_char(f) :
-    return struct.unpack('B', f.read(1))[0]
+    return unpack('B', f.read(1))[0]
 
 def read_signed_short(f) :
-    return struct.unpack('h', f.read(2))[0]
+    return unpack('h', f.read(2))[0]
         
 def read_unsigned_short(f) :
-    return struct.unpack('H', f.read(2))[0]
+    return unpack('H', f.read(2))[0]
 
 def read_signed_int(f) :
-    return struct.unpack('i', f.read(4))[0]
+    return unpack('i', f.read(4))[0]
     
 def read_unsigned_int(f) :
-    return struct.unpack('I', f.read(4))[0]
+    return unpack('I', f.read(4))[0]
 
 def read_unsigned_int_be(f):
-    return struct.unpack('>I', f.read(4))[0]
+    return unpack('>I', f.read(4))[0]
 
 def read_24bit_signed_number(f):
     s = b'0' + f.read(3)
-    num = struct.unpack('i', s)[0]
+    num = unpack('i', s)[0]
     return num >> 8
     
 def read_signed_long(f) :
-    return struct.unpack('q', f.read(8))[0]
+    return unpack('q', f.read(8))[0]
     
 def read_unsigned_long(f) :
-    return struct.unpack('Q', f.read(8))[0]
+    return unpack('Q', f.read(8))[0]
     
 def read_unsigned_long_be(f) :
-    return struct.unpack('>Q', f.read(8))[0]
+    return unpack('>Q', f.read(8))[0]
 
 def read_double(f) :
-    return struct.unpack('d', f.read(8))[0]
+    return unpack('d', f.read(8))[0]
 
 def string_as_hexcode(string) :
     for s in string :
