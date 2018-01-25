@@ -77,7 +77,7 @@ class RedisMemoryAnalyzer(object):
     def __init__(self, architecture=64, redis_version="3.2") :
         self.current_db = 0
         self.current_key = None
-        self.has_expiry = None
+        self.expiry = None
         self.rdb_version = 0
 
         self._db_expires = 0
@@ -111,16 +111,14 @@ class RedisMemoryAnalyzer(object):
             self.rdb_version = get_rdb_version(f.read(4))
             
             while True:
-                self.has_expiry = False
+                self.expiry = None
                 data_type = read_unsigned_char(f)
 
                 if data_type == REDIS_RDB_OPCODE_EXPIRETIME_MS:
-                    self.has_expiry = True
-                    skip(f, 8)
+                    self.expiry = to_datetime(read_unsigned_long(f) * 1000)
                     data_type = read_unsigned_char(f)
                 elif data_type == REDIS_RDB_OPCODE_EXPIRETIME:
-                    self.has_expiry = True
-                    skip(f, 4)
+                    self.expiry = to_datetime(read_unsigned_int(f) * 1000000)
                     data_type = read_unsigned_char(f)
 
                 if data_type == REDIS_RDB_OPCODE_SELECTDB:
@@ -211,13 +209,13 @@ class RedisMemoryAnalyzer(object):
 
     def get_memory_for_string(self, f):
         metadata = read_string_metadata(f)
-        size = self.top_level_object_overhead(self.current_key, self.has_expiry)
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
         size += self.sizeof_string(metadata.length, metadata.is_number, metadata.is_shared_number)
         
         ['database', 'type', 'key', 'bytes', 'encoding','size', 'len_largest_element', 'expiry', 'is_compressed', 'compressed_length']
         return MemoryRecord(
                 self.current_db, "string", self.current_key, size,
-                "string", metadata.length, metadata.length, self.has_expiry, 
+                "string", metadata.length, metadata.length, self.expiry, 
                 metadata.is_compressed, metadata.compressed_length
             )
 
@@ -441,15 +439,15 @@ class RedisMemoryAnalyzer(object):
             return self.malloc_overhead(len_of_str + 1 + 8 + 1)
         return self.malloc_overhead(len_of_str + 1 + 16 + 1)
 
-    def top_level_object_overhead(self, key, has_expiry):
+    def top_level_object_overhead(self, key, expiry):
         # Each top level object is an entry in a dictionary, and so we have to include 
         # the overhead of a dictionary entry
         return self.hashtable_entry_overhead() + self.sizeof_real_string(key) +\
-                     self.robj_overhead() + self.key_expiry_overhead(has_expiry)
+                     self.robj_overhead() + self.key_expiry_overhead(expiry)
 
-    def key_expiry_overhead(self, has_expiry):
+    def key_expiry_overhead(self, expiry):
         # If there is no expiry, there isn't any overhead
-        if not has_expiry:
+        if not expiry:
             return 0
         self._db_expires += 1
         # Key expiry is stored in a hashtable, so we have to pay for the cost of a hashtable entry
