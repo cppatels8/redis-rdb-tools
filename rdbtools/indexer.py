@@ -3,8 +3,11 @@ import io
 import datetime
 import re
 import os
-
+import random
+import bisect
+from collections import namedtuple
 from iowrapper import IOWrapper
+from distutils.version import StrictVersion
 
 try:
     try:
@@ -64,16 +67,33 @@ DATA_TYPE_MAPPING = {
     0 : "string", 1 : "list", 2 : "set", 3 : "sortedset", 4 : "hash", 5 : "sortedset", 6 : "module", 7: "module",
     9 : "hash", 10 : "list", 11 : "set", 12 : "sortedset", 13 : "hash", 14 : "list"}
 
+MemoryRecord = namedtuple('MemoryRecord', ['database', 'type', 'key', 'bytes', 'encoding','size', 'len_largest_element', 'expiry', 'is_compressed', 'compressed_length'])
+
 class RedisMemoryAnalyzer(object):
     """
     Provides a detailed breakup of memory used by a redis instance 
     
     """
-    def __init__(self) :
+    def __init__(self, architecture=64, redis_version="3.2") :
         self.current_db = 0
         self.current_key = None
         self.has_expiry = None
         self.rdb_version = 0
+
+        self._db_expires = 0
+        self._redis_version = StrictVersion(redis_version)
+        self._redis_version_gte_32 = (self._redis_version >= StrictVersion('3.2'))
+        self._redis_version_lt_32 = (self._redis_version < StrictVersion('3.2'))
+        self._redis_version_lt_4 =  (self._redis_version < StrictVersion('4.0'))
+        self._total_internal_frag = 0
+        if architecture == 64 or architecture == '64':
+            self._pointer_size = 8
+            self._long_size = 8
+            self._architecture = 64
+        elif architecture == 32 or architecture == '32':
+            self._pointer_size = 4
+            self._long_size = 4
+            self._architecture = 32
 
     def analyze_redis_instance(self, host, port, password):
         pass
@@ -83,9 +103,9 @@ class RedisMemoryAnalyzer(object):
         Parse a redis rdb dump file, and call methods in the 
         callback object during the parsing operation.
         """
-        self.parse_fd(open(filename, "rb"))
+        return self.get_memory_records(open(filename, "rb"))
 
-    def parse_fd(self, fd):
+    def get_memory_records(self, fd):
         with fd as f:
             verify_magic_string(f.read(5))
             self.rdb_version = get_rdb_version(f.read(4))
@@ -124,17 +144,15 @@ class RedisMemoryAnalyzer(object):
                     break
 
                 self.current_key = read_string(f)
-                #print(self.current_key)
-                self.read_object(f, data_type)
+                yield self.get_memory_for_obj(f, data_type)
 
 
     # Read an object for the stream
     # f is the redis file 
     # enc_type is the type of object
-    def read_object(self, f, enc_type) :
+    def get_memory_for_obj(self, f, enc_type) :
         if enc_type == REDIS_RDB_TYPE_STRING:
-            val = read_string(f)
-            # self._callback.set(self._key, val, self._expiry, info={'encoding':'string'})
+            return self.get_memory_for_string(f)
         elif enc_type == REDIS_RDB_TYPE_LIST:
             # A redis list is just a sequence of strings
             # We successively read strings from the stream and create a list from it
@@ -189,7 +207,19 @@ class RedisMemoryAnalyzer(object):
         elif enc_type == REDIS_RDB_TYPE_MODULE_2:
             self.read_module(f)
         else:
-            raise Exception('read_object', 'Invalid object type %d for key %s' % (enc_type, self._key))
+            raise Exception('read_object', 'Invalid object type %d for key %s' % (enc_type, self.current_key))
+
+    def get_memory_for_string(self, f):
+        metadata = read_string_metadata(f)
+        size = self.top_level_object_overhead(self.current_key, self.has_expiry)
+        size += self.sizeof_string(metadata.length, metadata.is_number, metadata.is_shared_number)
+        
+        ['database', 'type', 'key', 'bytes', 'encoding','size', 'len_largest_element', 'expiry', 'is_compressed', 'compressed_length']
+        return MemoryRecord(
+                self.current_db, "string", self.current_key, size,
+                "string", metadata.length, metadata.length, self.has_expiry, 
+                metadata.is_compressed, metadata.compressed_length
+            )
 
     def read_intset(self, f) :
         raw_string = read_string(f)
@@ -383,6 +413,168 @@ class RedisMemoryAnalyzer(object):
             iowrapper.stop_recording()
         self._callback.end_module(self._key, buffer_size=iowrapper.get_recorded_size(), buffer=buffer)
 
+    ### Memory calculation functions
+    def sizeof_real_string(self, str):
+        try:
+            val = int(str)
+            return self.sizeof_string(-1, True, val < REDIS_SHARED_INTEGERS)
+        except:
+            return self.sizeof_string(len(str), False)
+
+    def sizeof_string(self, len_of_str, is_number, is_shared_number=False):
+        # https://github.com/antirez/redis/blob/unstable/src/sds.h
+        if is_number: 
+            if is_shared_number:
+                return 0
+            else:
+                return 8
+
+        if self._redis_version_lt_32:
+            return self.malloc_overhead(len_of_str + 8 + 1)
+        if len_of_str < 2**5:
+            return self.malloc_overhead(len_of_str + 1 + 1)
+        if len_of_str < 2**8:
+            return self.malloc_overhead(len_of_str + 1 + 2 + 1)
+        if len_of_str < 2**16:
+            return self.malloc_overhead(len_of_str + 1 + 4 + 1)
+        if len_of_str < 2**32:
+            return self.malloc_overhead(len_of_str + 1 + 8 + 1)
+        return self.malloc_overhead(len_of_str + 1 + 16 + 1)
+
+    def top_level_object_overhead(self, key, has_expiry):
+        # Each top level object is an entry in a dictionary, and so we have to include 
+        # the overhead of a dictionary entry
+        return self.hashtable_entry_overhead() + self.sizeof_real_string(key) +\
+                     self.robj_overhead() + self.key_expiry_overhead(has_expiry)
+
+    def key_expiry_overhead(self, has_expiry):
+        # If there is no expiry, there isn't any overhead
+        if not has_expiry:
+            return 0
+        self._db_expires += 1
+        # Key expiry is stored in a hashtable, so we have to pay for the cost of a hashtable entry
+        # The timestamp itself is stored as an int64, which is a 8 bytes
+        return self.hashtable_entry_overhead() + 8
+        
+    def hashtable_overhead(self, size):
+        # See  https://github.com/antirez/redis/blob/unstable/src/dict.h
+        # See the structures dict and dictht
+        # 2 * (3 unsigned longs + 1 pointer) + int + long + 2 pointers
+        # 
+        # Additionally, see **table in dictht
+        # The length of the table is the next power of 2
+        # When the hashtable is rehashing, another instance of **table is created
+        # Due to the possibility of rehashing during loading, we calculate the worse 
+        # case in which both tables are allocated, and so multiply
+        # the size of **table by 1.5
+        return 4 + 7*self.sizeof_long() + 4*self.sizeof_pointer() + self.next_power(size)*self.sizeof_pointer()*1.5
+        
+    def hashtable_entry_overhead(self):
+        # See  https://github.com/antirez/redis/blob/unstable/src/dict.h
+        # Each dictEntry has 2 pointers + int64
+        return 2*self.sizeof_pointer() + 8
+    
+    def linkedlist_overhead(self):
+        # See https://github.com/antirez/redis/blob/unstable/src/adlist.h
+        # A list has 5 pointers + an unsigned long
+        return self.sizeof_long() + 5*self.sizeof_pointer()
+
+    def quicklist_overhead(self, zip_count):
+        quicklist = 2*self.sizeof_pointer()+self.sizeof_long()+2*4
+        quickitem = 4*self.sizeof_pointer()+self.sizeof_long()+2*4
+        return quicklist + zip_count*quickitem
+
+    def linkedlist_entry_overhead(self):
+        # See https://github.com/antirez/redis/blob/unstable/src/adlist.h
+        # A node has 3 pointers
+        return 3*self.sizeof_pointer()
+
+    def ziplist_header_overhead(self):
+        # See https://github.com/antirez/redis/blob/unstable/src/ziplist.c
+        # <zlbytes><zltail><zllen><entry><entry><zlend>
+        return 4 + 4 + 2 + 1
+
+    def ziplist_entry_overhead(self, value):
+        # See https://github.com/antirez/redis/blob/unstable/src/ziplist.c
+        if type(value) == int:
+            header = 1
+            if value < 12:
+                size = 0
+            elif value < 2**8:
+                size = 1
+            elif value < 2**16:
+                size = 2
+            elif value < 2**24:
+                size = 3
+            elif value < 2**32:
+                size = 4
+            else:
+                size = 8
+        else:
+            size = len(value)
+            if size <= 63:
+                header = 1
+            elif size <= 16383:
+                header = 2
+            else:
+                header = 5
+        # add len again for prev_len of the next record
+        prev_len = 1 if size < 254 else 5
+        return prev_len + header + size
+
+    def skiplist_overhead(self, size):
+        return 2*self.sizeof_pointer() + self.hashtable_overhead(size) + (2*self.sizeof_pointer() + 16)
+    
+    def skiplist_entry_overhead(self):
+        return self.hashtable_entry_overhead() + 2*self.sizeof_pointer() + 8 + (self.sizeof_pointer() + 8) * self.zset_random_level()
+    
+    def robj_overhead(self):
+        return self.sizeof_pointer() + 8
+        
+    def malloc_overhead(self, size):
+        alloc = get_jemalloc_allocation(size)
+        self._total_internal_frag += alloc - size
+        return alloc
+
+    def size_t(self):
+        return self.sizeof_pointer()
+        
+    def sizeof_pointer(self):
+        return self._pointer_size
+        
+    def sizeof_long(self):
+        return self._long_size
+
+    def next_power(self, size):
+        power = 1
+        while (power <= size) :
+            power = power << 1
+        return power
+ 
+    def zset_random_level(self):
+        level = 1
+        rint = random.randint(0, 0xFFFF)
+        while (rint < ZSKIPLIST_P * 0xFFFF):
+            level += 1
+            rint = random.randint(0, 0xFFFF)        
+        if level < ZSKIPLIST_MAXLEVEL :
+            return level
+        else:
+            return ZSKIPLIST_MAXLEVEL
+
+    def element_length(self, element):
+        if isinstance(element, int):
+            return self._long_size
+        if sys.version_info < (3,):
+            if isinstance(element, long):
+                return self._long_size
+        return len(element)
+
+
+### END OF RedisMemoryAnalyzer
+
+
+
 def _decode_module_id(module_id):
     """
     decode module id to string
@@ -435,6 +627,43 @@ def lzf_decompress(compressed, expected_length):
             raise Exception('lzf_decompress', 'Expected lengths do not match %d != %d' % (len(out_stream), expected_length))
         return bytes(out_stream)
 
+# size classes from jemalloc 4.0.4 using LG_QUANTUM=3
+jemalloc_size_classes = [
+    8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
+    1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384, 20480, 24576,
+    28672, 32768, 40960, 49152, 57344, 65536, 81920, 98304, 114688,131072, 163840, 196608, 229376, 262144, 327680,
+    393216, 458752, 524288, 655360, 786432, 917504, 1048576, 1310720, 1572864, 1835008, 2097152, 2621440, 3145728,
+    3670016, 4194304, 5242880, 6291456, 7340032, 8388608, 10485760, 12582912, 14680064, 16777216, 20971520, 25165824,
+    29360128, 33554432, 41943040, 50331648, 58720256, 67108864, 83886080, 100663296, 117440512, 134217728, 167772160,
+    201326592, 234881024, 268435456, 335544320, 402653184, 469762048, 536870912, 671088640, 805306368, 939524096,
+    1073741824, 1342177280, 1610612736, 1879048192, 2147483648, 2684354560, 3221225472, 3758096384, 4294967296,
+    5368709120, 6442450944, 7516192768, 8589934592, 10737418240, 12884901888, 15032385536, 17179869184, 21474836480,
+    25769803776, 30064771072, 34359738368, 42949672960, 51539607552, 60129542144, 68719476736, 85899345920,
+    103079215104, 120259084288, 137438953472, 171798691840, 206158430208, 240518168576, 274877906944, 343597383680,
+    412316860416, 481036337152, 549755813888, 687194767360, 824633720832, 962072674304, 1099511627776,1374389534720,
+    1649267441664, 1924145348608, 2199023255552, 2748779069440, 3298534883328, 3848290697216, 4398046511104,
+    5497558138880, 6597069766656, 7696581394432, 8796093022208, 10995116277760, 13194139533312, 15393162788864,
+    17592186044416, 21990232555520, 26388279066624, 30786325577728, 35184372088832, 43980465111040, 52776558133248,
+    61572651155456, 70368744177664, 87960930222080, 105553116266496, 123145302310912, 140737488355328, 175921860444160,
+    211106232532992, 246290604621824, 281474976710656, 351843720888320, 422212465065984, 492581209243648,
+    562949953421312, 703687441776640, 844424930131968, 985162418487296, 1125899906842624, 1407374883553280,
+    1688849860263936, 1970324836974592, 2251799813685248, 2814749767106560, 3377699720527872, 3940649673949184,
+    4503599627370496, 5629499534213120, 6755399441055744, 7881299347898368, 9007199254740992, 11258999068426240,
+    13510798882111488, 15762598695796736, 18014398509481984, 22517998136852480, 27021597764222976,31525197391593472,
+    36028797018963968, 45035996273704960, 54043195528445952, 63050394783186944, 72057594037927936, 90071992547409920,
+    108086391056891904, 126100789566373888, 144115188075855872, 180143985094819840, 216172782113783808,
+    252201579132747776, 288230376151711744, 360287970189639680, 432345564227567616, 504403158265495552,
+    576460752303423488, 720575940379279360, 864691128455135232, 1008806316530991104, 1152921504606846976,
+    1441151880758558720, 1729382256910270464, 2017612633061982208, 2305843009213693952, 2882303761517117440,
+    3458764513820540928, 4035225266123964416, 4611686018427387904, 5764607523034234880, 6917529027641081856,
+    8070450532247928832, 9223372036854775808, 11529215046068469760, 13835058055282163712, 16140901064495857664
+]  # TODO: use different table depending oon the redis-version used
+
+def get_jemalloc_allocation(size):
+    idx = bisect.bisect_left(jemalloc_size_classes, size)
+    alloc = jemalloc_size_classes[idx] if idx < len(jemalloc_size_classes) else size
+    return alloc
+
 def verify_magic_string(magic_string) :
     if magic_string != b'REDIS' :
         raise Exception('verify_magic_string', 'Invalid File Format')
@@ -485,10 +714,16 @@ def skip_binary_double(f):
 def skip_checksum(f):
     skip(f, 8)
 
+def skip_signed_char(f):
+    skip(f, 1)
+
 def skip_unsigned_char(f):
     skip(f, 1)
 
 def skip_unsigned_int(f):
+    skip(f, 4)
+
+def skip_signed_int(f):
     skip(f, 4)
 
 def skip_unsigned_long(f):
@@ -530,6 +765,42 @@ def read_length_with_encoding(f):
 
 def read_length(f) :
     return read_length_with_encoding(f)[0]
+
+StringMetadata = namedtuple('StringMetadata', ['length', 'is_number', 'is_shared_number', 'is_compressed', 'compressed_length'])
+def read_string_metadata(f):
+    tup = read_length_with_encoding(f)
+    length = tup[0]
+    is_encoded = tup[1]
+    is_number = False
+    is_shared_number = False
+    is_compressed = False
+    compressed_length = 0
+
+    if is_encoded:
+        flag = length
+        if flag == REDIS_RDB_ENC_INT8:
+            is_number = True
+            is_shared_number = True
+            skip_signed_char(f)
+        elif flag == REDIS_RDB_ENC_INT16:
+            is_number = True
+            _val = read_signed_short(f)
+            is_shared_number = _val < REDIS_SHARED_INTEGERS
+        elif flag == REDIS_RDB_ENC_INT32:
+            is_number = True
+            is_shared_number = False
+            skip_signed_int(f)
+        elif flag == REDIS_RDB_ENC_LZF:
+            is_compressed = True
+            compressed_length = read_length(f)
+            length = read_length(f)
+            skip(f, compressed_length)
+    else:
+        skip(f, length)
+
+    return StringMetadata(length=length, 
+                is_number=is_number, is_shared_number=is_shared_number,
+                is_compressed=is_compressed, compressed_length=compressed_length)
 
 def read_string(f) :
     tup = read_length_with_encoding(f)
@@ -620,5 +891,9 @@ def string_as_hexcode(string) :
         else :
             print(hex(ord(s)))
 
+
 if __name__ == '__main__':
-    RedisMemoryAnalyzer().analyze_rdb("/Users/sripathikrishnan/apps/redis-dumps/datascience_se.rdb")
+    with open("/Users/sripathikrishnan/apps/redis-dumps/asianet.rdb", "rb") as f:
+        records = RedisMemoryAnalyzer().get_memory_records(f)
+        for record in records:
+            print(record)
