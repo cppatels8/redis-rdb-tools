@@ -69,6 +69,11 @@ DATA_TYPE_MAPPING = {
 
 MemoryRecord = namedtuple('MemoryRecord', ['database', 'type', 'key', 'bytes', 'encoding','size', 'len_largest_element', 'expiry', 'is_compressed', 'compressed_length'])
 
+
+ZSKIPLIST_MAXLEVEL=32
+ZSKIPLIST_P=0.25
+REDIS_SHARED_INTEGERS = 10000
+
 class RedisMemoryAnalyzer(object):
     """
     Provides a detailed breakup of memory used by a redis instance 
@@ -137,7 +142,6 @@ class RedisMemoryAnalyzer(object):
 
                 if data_type == REDIS_RDB_OPCODE_EOF:
                     if self.rdb_version >= 5:
-                        # f.read(8)
                         skip_checksum(f)
                     break
 
@@ -197,7 +201,7 @@ class RedisMemoryAnalyzer(object):
         elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
             self.read_zset_from_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPLIST:
-            self.read_hash_from_ziplist(f)
+            return self.hash_from_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
             self.read_list_from_quicklist(f)
         elif enc_type == REDIS_RDB_TYPE_MODULE:
@@ -212,7 +216,6 @@ class RedisMemoryAnalyzer(object):
         size = self.top_level_object_overhead(self.current_key, self.expiry)
         size += self.sizeof_string(metadata.length, metadata.is_number, metadata.is_shared_number)
         
-        ['database', 'type', 'key', 'bytes', 'encoding','size', 'len_largest_element', 'expiry', 'is_compressed', 'compressed_length']
         return MemoryRecord(
                 self.current_db, "string", self.current_key, size,
                 "string", metadata.length, metadata.length, self.expiry, 
@@ -238,7 +241,7 @@ class RedisMemoryAnalyzer(object):
         # self._callback.end_set(self._key)
 
     def read_ziplist(self, f):
-        raw_string = self.read_string(f)
+        raw_string = read_string(f)
         buff = BytesIO(raw_string)
         zlbytes = read_unsigned_int(buff)
         tail_offset = read_unsigned_int(buff)
@@ -293,7 +296,7 @@ class RedisMemoryAnalyzer(object):
             raise Exception('read_zset_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self._key))
         # self._callback.end_sorted_set(self._key)
 
-    def read_hash_from_ziplist(self, f) :
+    def hash_from_ziplist(self, f):
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
         zlbytes = read_unsigned_int(buff)
@@ -302,16 +305,75 @@ class RedisMemoryAnalyzer(object):
         if (num_entries % 2) :
             raise Exception('read_hash_from_ziplist', "Expected even number of elements, but found %d for key %s" % (num_entries, self._key))
         num_entries = num_entries // 2
-        # self._callback.start_hash(self._key, num_entries, self._expiry, info={'encoding':'ziplist', 'sizeof_value':len(raw_string)})
+        
+        max_field_size = -1
+        max_value_size = -1
+        
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        size += len(raw_string)
+
+        # We now want to calculate the max field size and max value size
+        # Note that we don't want the actual field or value, just their lengths
         for x in range(0, num_entries) :
-            field = self.read_ziplist_entry(buff)
-            value = self.read_ziplist_entry(buff)
-            # self._callback.hset(self._key, field, value)
+            # self.read_ziplist_entry(buff)
+            # self.read_ziplist_entry(buff)
+            field_length = self.read_ziplist_entry_length(buff)
+            value_length = self.read_ziplist_entry_length(buff)
+            if field_length > max_field_size:
+                max_field_size = field_length
+            if value_length > max_value_size:
+                max_value_size = value_length
+            
         zlist_end = read_unsigned_char(buff)
         if zlist_end != 255 : 
-            raise Exception('read_hash_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self._key))
-        # self._callback.end_hash(self._key)
-    
+            raise Exception('read_hash_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
+        
+        return MemoryRecord(
+                self.current_db, "list", self.current_key, size,
+                "ziplist", num_entries, max_value_size, 
+                self.expiry, 
+                False, -1
+            )
+
+    def read_ziplist_entry_length(self, f) :
+        length = 0
+        prev_length = read_unsigned_char(f)
+        if prev_length == 254 :
+            prev_length = read_unsigned_int(f)
+        
+        entry_header = read_unsigned_char(f)
+        if (entry_header >> 6) == 0 :
+            length = entry_header & 0x3F
+            skip(f, length)
+            return length
+        elif (entry_header >> 6) == 1 :
+            length = ((entry_header & 0x3F) << 8) | read_unsigned_char(f)
+            skip(f, length)
+            return length
+        elif (entry_header >> 6) == 2 :
+            length = read_unsigned_int_be(f)
+            skip(f, length)
+            return length
+        elif (entry_header >> 4) == 12 :
+            skip_signed_short(f)
+            return self._long_size
+        elif (entry_header >> 4) == 13 :
+            skip_signed_int(f)
+            return self._long_size
+        elif (entry_header >> 4) == 14 :
+            skip_signed_long(f)
+            return self._long_size
+        elif (entry_header == 240) :
+            _ = read_24bit_signed_number(f)
+            return self._long_size
+        elif (entry_header == 254) :
+            skip_signed_char(f)
+            return self._long_size
+        elif (entry_header >= 241 and entry_header <= 253) :
+            return self._long_size
+        else:
+            raise Exception('read_ziplist_entry', 'Invalid entry_header %d for key %s' % (entry_header, self._key))
+
     def read_ziplist_entry(self, f) :
         length = 0
         value = None
@@ -345,7 +407,7 @@ class RedisMemoryAnalyzer(object):
         return value
         
     def read_zipmap(self, f) :
-        raw_string = self.read_string(f)
+        raw_string = read_string(f)
         buff = io.BytesIO(bytearray(raw_string))
         num_entries = read_unsigned_char(buff)
         # self._callback.start_hash(self._key, num_entries, self._expiry, info={'encoding':'zipmap', 'sizeof_value':len(raw_string)})
@@ -382,34 +444,34 @@ class RedisMemoryAnalyzer(object):
         iowrapper = IOWrapper(f)
         iowrapper.start_recording_size()
         iowrapper.start_recording()
-        length, encoding = self.read_length_with_encoding(iowrapper)
-        record_buffer = self._callback.start_module(self._key, _decode_module_id(length), self._expiry)
-
+        length, encoding = read_length_with_encoding(iowrapper)
+        # record_buffer = self._callback.start_module(self._key, _decode_module_id(length), self._expiry)
+        record_buffer = False
         if not record_buffer:
             iowrapper.stop_recording()
 
-        opcode = self.read_length(iowrapper)
+        opcode = read_length(iowrapper)
         while opcode != REDIS_RDB_MODULE_OPCODE_EOF:
             if opcode == REDIS_RDB_MODULE_OPCODE_SINT or opcode == REDIS_RDB_MODULE_OPCODE_UINT:
-                data = self.read_length(iowrapper)
+                data = read_length(iowrapper)
             elif opcode == REDIS_RDB_MODULE_OPCODE_FLOAT:
-                data = self.read_float(iowrapper)
+                data = read_float(iowrapper)
             elif opcode == REDIS_RDB_MODULE_OPCODE_DOUBLE:
                 data = read_double(iowrapper)
             elif opcode == REDIS_RDB_MODULE_OPCODE_STRING:
-                data = self.read_string(iowrapper)
+                data = read_string(iowrapper)
             else:
                 raise Exception("Unknown module opcode %s" % opcode)
-            self._callback.handle_module_data(self._key, opcode, data)
+            # self._callback.handle_module_data(self._key, opcode, data)
             # read the next item in the module data type
-            opcode = self.read_length(iowrapper)
+            opcode = read_length(iowrapper)
 
         buffer = None
         if record_buffer:
             # prepand the buffer with REDIS_RDB_TYPE_MODULE_2 type
             buffer = pack('B', REDIS_RDB_TYPE_MODULE_2) + iowrapper.get_recorded_buffer()
             iowrapper.stop_recording()
-        self._callback.end_module(self._key, buffer_size=iowrapper.get_recorded_size(), buffer=buffer)
+        # self._callback.end_module(self._key, buffer_size=iowrapper.get_recorded_size(), buffer=buffer)
 
     ### Memory calculation functions
     def sizeof_real_string(self, str):
@@ -571,8 +633,6 @@ class RedisMemoryAnalyzer(object):
 
 ### END OF RedisMemoryAnalyzer
 
-
-
 def _decode_module_id(module_id):
     """
     decode module id to string
@@ -718,6 +778,9 @@ def skip_signed_char(f):
 def skip_unsigned_char(f):
     skip(f, 1)
 
+def skip_signed_short(f):
+    skip(f, 2)
+
 def skip_unsigned_int(f):
     skip(f, 4)
 
@@ -822,7 +885,7 @@ def read_string(f) :
         val = f.read(length)
     return val
 
-def read_float(self, f):
+def read_float(f):
     dbl_length = read_unsigned_char(f)
     if dbl_length == 253:
         return float('nan')
@@ -891,7 +954,14 @@ def string_as_hexcode(string) :
 
 
 if __name__ == '__main__':
-    with open("/Users/sripathikrishnan/apps/redis-dumps/asianet.rdb", "rb") as f:
-        records = RedisMemoryAnalyzer().get_memory_records(f)
-        for record in records:
-            print(record)
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dumps_dir = os.path.join(base_dir, "tests", "dumps")
+    for rdb in os.listdir(dumps_dir):
+        if not rdb.endswith(".rdb"):
+            continue
+        with open(os.path.join(dumps_dir, rdb), "rb") as f:
+            records = RedisMemoryAnalyzer().get_memory_records(f)
+            for record in records:
+                print(record)
+
