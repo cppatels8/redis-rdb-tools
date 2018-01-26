@@ -3,6 +3,8 @@ import io
 import datetime
 import re
 import os
+import csv
+import sys
 import random
 import bisect
 from collections import namedtuple
@@ -1088,8 +1090,7 @@ def string_as_hexcode(string) :
         else :
             print(hex(ord(s)))
 
-if __name__ == '__main__':
-
+def test_dumps():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dumps_dir = os.path.join(base_dir, "tests", "dumps")
     for rdb in os.listdir(dumps_dir):
@@ -1102,3 +1103,11 @@ if __name__ == '__main__':
                 if record and record.encoding in ('quicklist'):
                     print(record)
 
+if __name__ == '__main__':
+    with open(sys.argv[1], "rb") as f:
+        records = RedisMemoryAnalyzer().get_memory_records(f)
+
+        with open(sys.argv[2], "w") as f:
+            writer = csv.writer(f, delimiter=',', quotechar='"')
+            for record in records:
+                writer.writerow(record)
