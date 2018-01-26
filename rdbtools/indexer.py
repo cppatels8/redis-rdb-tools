@@ -184,13 +184,7 @@ class RedisMemoryAnalyzer(object):
         elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
             return self.memory_for_zset_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH:
-            length = read_length(f)
-            # self._callback.start_hash(self._key, length, self._expiry, info={'encoding':'hashtable'})
-            for count in range(0, length):
-                field = read_string(f)
-                value = read_string(f)
-                # self._callback.hset(self._key, field, value)
-            # self._callback.end_hash(self._key)
+            return self.memory_for_hash_hashtable(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPMAP:
             self.read_zipmap(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPLIST:
@@ -335,7 +329,41 @@ class RedisMemoryAnalyzer(object):
                 self.current_db, "zset", self.current_key, size,
                 "ziplist", num_entries, max_key_size, self.expiry, 
                 False, -1
-            )        
+            )
+
+    def memory_for_hash_hashtable(self, f):
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        max_field_length = -1
+        max_value_length = -1
+        savings_if_compressed = 0
+
+        length = read_length(f)
+        for count in range(0, length):
+            field = read_string_metadata(f)
+            value = read_string_metadata(f)
+
+            if field.length > max_field_length:
+                max_field_length = field.length
+            if value.length > max_value_length:
+                max_value_length = value.length
+
+            if value.is_compressed:
+                savings_if_compressed += value.compressed_length
+
+            field_size = self.sizeof_string(field.length, field.is_number, field.is_shared_number)
+            value_size = self.sizeof_string(value.length, value.is_number, value.is_shared_number)
+            size += field_size
+            size += value_size
+        
+        size += self.hashtable_entry_overhead() * length
+        if self._redis_version_lt_4:
+            size += 2*self.robj_overhead() * length
+
+        return MemoryRecord(
+                self.current_db, "hash", self.current_key, size,
+                "hashtable", size, max_value_length, self.expiry, 
+                False, savings_if_compressed
+            )
 
     def memory_for_hash_ziplist(self, f):
         raw_string = read_string(f)
@@ -1007,6 +1035,6 @@ if __name__ == '__main__':
             print("Processing file %s" % rdb)
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                if record and record.encoding in ('ziplist') and record.type=='zset':
+                if record and record.encoding in ('hashtable') and record.type=='hash':
                     print(record)
 
