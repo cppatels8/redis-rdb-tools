@@ -160,39 +160,25 @@ class RedisMemoryAnalyzer(object):
         elif enc_type == REDIS_RDB_TYPE_LIST_ZIPLIST:
             return self.memory_for_list_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
-            self.memory_for_list_quicklist(f)
+            return self.memory_for_list_quicklist(f)
         elif enc_type == REDIS_RDB_TYPE_SET:
-            # A redis list is just a sequence of strings
-            # We successively read strings from the stream and create a set from it
-            # Note that the order of strings is non-deterministic
-            length = read_length(f)
-            # self._callback.start_set(self._key, length, self._expiry, info={'encoding':'hashtable'})
-            for count in range(0, length):
-                val = read_string(f)
-                # self._callback.sadd(self._key, val)
-            # self._callback.end_set(self._key)
+            return self.memory_for_set_hashtable(f)
         elif enc_type == REDIS_RDB_TYPE_SET_INTSET:
-            self.memory_for_set_intset(f)
+            return self.memory_for_set_intset(f)
         elif enc_type == REDIS_RDB_TYPE_ZSET or enc_type == REDIS_RDB_TYPE_ZSET_2 :
-            length = read_length(f)
-            # self._callback.start_sorted_set(self._key, length, self._expiry, info={'encoding':'skiplist'})
-            for count in range(0, length):
-                val = read_string(f)
-                score = read_double(f) if enc_type == REDIS_RDB_TYPE_ZSET_2 else read_float(f)
-                # self._callback.zadd(self._key, score, val)
-            # self._callback.end_sorted_set(self._key)
+            return self.memory_for_zset_skiplist(f, enc_type)
         elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
             return self.memory_for_zset_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH:
             return self.memory_for_hash_hashtable(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPMAP:
-            self.read_zipmap(f)
+            return self.read_zipmap(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPLIST:
             return self.memory_for_hash_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_MODULE:
             raise Exception('read_object', 'Unable to read Redis Modules RDB objects (key %s)' % self._key)
         elif enc_type == REDIS_RDB_TYPE_MODULE_2:
-            self.read_module(f)
+            return self.read_module(f)
         else:
             raise Exception('read_object', 'Invalid object type %d for key %s' % (enc_type, self.current_key))
 
@@ -279,8 +265,37 @@ class RedisMemoryAnalyzer(object):
             zlist_end = read_unsigned_char(buff)
             if zlist_end != 255:
                 raise Exception('read_quicklist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
-        # self._callback.end_list(self._key, info={'encoding': 'quicklist', 'zips': count, 'sizeof_value': total_size})
 
+    def memory_for_set_hashtable(self, f):
+        # A redis list is just a sequence of strings
+        # We successively read strings from the stream and create a set from it
+        # Note that the order of strings is non-deterministic
+
+        savings_if_compressed = 0
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        length = read_length(f)
+        max_element_length = -1
+
+        for count in range(0, length):
+            element = read_string_metadata(f)
+            element_size = self.sizeof_string(element.length, element.is_number, element.is_shared_number)
+            size += element_size
+            if element.is_compressed:
+                savings_if_compressed += (element.length - element.compressed_length)
+
+            if element.length > max_element_length:
+                max_element_length = element.length
+
+        size += self.hashtable_entry_overhead() * length
+        if self._redis_version_lt_4:
+            size += self.robj_overhead() * length
+
+        return MemoryRecord(
+                self.current_db, "set", self.current_key, size,
+                "hashtable", size, max_element_length, self.expiry, 
+                False, savings_if_compressed
+            )
+        
     def memory_for_set_intset(self, f) :
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
@@ -297,6 +312,40 @@ class RedisMemoryAnalyzer(object):
         return MemoryRecord(
                 self.current_db, "set", self.current_key, size,
                 "intset%d" % encoding, num_entries, encoding, self.expiry, 
+                False, -1
+            )
+
+    def memory_for_zset_skiplist(self, f, enc_type):
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        length = read_length(f)
+        max_key_length = -1
+
+        for count in range(0, length):
+            key = read_string_metadata(f)
+            if key.length > max_key_length:
+                max_key_length = key.length
+            key_size = self.sizeof_string(key.length, key.is_number, key.is_shared_number)
+            if enc_type == REDIS_RDB_TYPE_ZSET_2:
+                read_double(f)
+            else:
+                read_float(f)
+                # skip_float(f)
+
+            size += key_size
+        
+        element_overhead = self.skiplist_entry_overhead()
+        if enc_type == REDIS_RDB_TYPE_ZSET_2:
+            element_overhead += 8
+        else:
+            element_overhead += 4
+        if self._redis_version_lt_4:
+            element_overhead += self.robj_overhead()
+        
+        size += element_overhead * length
+
+        return MemoryRecord(
+                self.current_db, "zset", self.current_key, size,
+                "skiplist", length, max_key_length, self.expiry, 
                 False, -1
             )
 
@@ -348,7 +397,7 @@ class RedisMemoryAnalyzer(object):
                 max_value_length = value.length
 
             if value.is_compressed:
-                savings_if_compressed += value.compressed_length
+                savings_if_compressed += (value.length - value.compressed_length)
 
             field_size = self.sizeof_string(field.length, field.is_number, field.is_shared_number)
             value_size = self.sizeof_string(value.length, value.is_number, value.is_shared_number)
@@ -835,7 +884,7 @@ def skip_float(f):
     if dbl_length < 253:
         skip(f, dbl_length)
     
-def skip_binary_double(f):
+def skip_double(f):
     skip(f, 8)
 
 def skip_checksum(f):
@@ -1035,6 +1084,6 @@ if __name__ == '__main__':
             print("Processing file %s" % rdb)
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                if record and record.encoding in ('hashtable') and record.type=='hash':
+                if record and record.encoding in ('skiplist') and record.type=='zset':
                     print(record)
 
