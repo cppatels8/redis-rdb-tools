@@ -158,9 +158,9 @@ class RedisMemoryAnalyzer(object):
         elif enc_type == REDIS_RDB_TYPE_LIST:
             return self.memory_for_list_linkedlist(f)
         elif enc_type == REDIS_RDB_TYPE_LIST_ZIPLIST:
-            self.read_ziplist(f)
+            return self.memory_for_list_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
-            self.read_list_from_quicklist(f)
+            self.memory_for_list_quicklist(f)
         elif enc_type == REDIS_RDB_TYPE_SET:
             # A redis list is just a sequence of strings
             # We successively read strings from the stream and create a set from it
@@ -172,7 +172,7 @@ class RedisMemoryAnalyzer(object):
                 # self._callback.sadd(self._key, val)
             # self._callback.end_set(self._key)
         elif enc_type == REDIS_RDB_TYPE_SET_INTSET:
-            self.read_intset(f)
+            self.memory_for_set_intset(f)
         elif enc_type == REDIS_RDB_TYPE_ZSET or enc_type == REDIS_RDB_TYPE_ZSET_2 :
             length = read_length(f)
             # self._callback.start_sorted_set(self._key, length, self._expiry, info={'encoding':'skiplist'})
@@ -240,26 +240,38 @@ class RedisMemoryAnalyzer(object):
                 any_element_compressed, compressed_size
             )
 
-    def read_ziplist(self, f):
+    def memory_for_list_ziplist(self, f):
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
         zlbytes = read_unsigned_int(buff)
         tail_offset = read_unsigned_int(buff)
         num_entries = read_unsigned_short(buff)
-        # self._callback.start_list(self._key, self._expiry, info={'encoding':'ziplist', 'sizeof_value':len(raw_string)})
+        
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        size += len(raw_string)
+
+        max_value_size = -1
+
         for x in range(0, num_entries):
-            val = self.read_ziplist_entry(buff)
-            # self._callback.rpush(self._key, val)
+            value_length = self.read_ziplist_entry_length(buff)
+            if value_length > max_value_size:
+                max_value_size = value_length
 
         zlist_end = read_unsigned_char(buff)
         if zlist_end != 255 : 
             raise Exception('read_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self._key))
-        # self._callback.end_list(self._key, info={'encoding':'ziplist'})
 
-    def read_list_from_quicklist(self, f):
+        return MemoryRecord(
+                self.current_db, "list", self.current_key, size,
+                "ziplist", num_entries, max_value_size, 
+                self.expiry, 
+                False, -1
+            )        
+
+    # TODO: Implement this
+    def memory_for_list_quicklist(self, f):
         count = read_length(f)
         total_size = 0
-        # self._callback.start_list(self._key, self._expiry, info={'encoding': 'quicklist', 'zips': count})
         for i in range(0, count):
             raw_string = read_string(f)
             total_size += len(raw_string)
@@ -275,23 +287,27 @@ class RedisMemoryAnalyzer(object):
                 raise Exception('read_quicklist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
         # self._callback.end_list(self._key, info={'encoding': 'quicklist', 'zips': count, 'sizeof_value': total_size})
 
-    def read_intset(self, f) :
+    def memory_for_set_intset(self, f) :
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
         encoding = read_unsigned_int(buff)
         num_entries = read_unsigned_int(buff)
-        # self._callback.start_set(self._key, num_entries, self._expiry, info={'encoding':'intset', 'sizeof_value':len(raw_string)})
-        for x in range(0, num_entries) :
-            if encoding == 8 :
-                entry = read_signed_long(buff)
-            elif encoding == 4 :
-                entry = read_signed_int(buff)
-            elif encoding == 2 :
-                entry = read_signed_short(buff)
-            else :
-                raise Exception('read_intset', 'Invalid encoding %d for key %s' % (encoding, self._key))
-            # self._callback.sadd(self._key, entry)
-        # self._callback.end_set(self._key)
+
+        print(encoding)
+        print(num_entries)
+        
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        size += len(raw_string)
+
+        # Since we have already loaded the string into memory
+        # we don't have to skip any more bytes in the file stream
+        # skip(f, num_entries * encoding)
+        
+        return MemoryRecord(
+                self.current_db, "set", self.current_key, size,
+                "intset%d" % encoding, num_entries, encoding, self.expiry, 
+                False, -1
+            )
 
     def read_zset_from_ziplist(self, f) :
         raw_string = read_string(f)
@@ -347,7 +363,7 @@ class RedisMemoryAnalyzer(object):
             raise Exception('read_hash_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
         
         return MemoryRecord(
-                self.current_db, "list", self.current_key, size,
+                self.current_db, "hash", self.current_key, size,
                 "ziplist", num_entries, max_value_size, 
                 self.expiry, 
                 False, -1
@@ -808,6 +824,9 @@ def skip_signed_int(f):
 def skip_unsigned_long(f):
     skip(f, 8)
 
+def skip_signed_long(f):
+    skip(f, 8)
+
 def skip_length_field(f):
     length = 0
     is_encoded = False
@@ -970,7 +989,6 @@ def string_as_hexcode(string) :
         else :
             print(hex(ord(s)))
 
-
 if __name__ == '__main__':
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -979,8 +997,9 @@ if __name__ == '__main__':
         if not rdb.endswith(".rdb"):
             continue
         with open(os.path.join(dumps_dir, rdb), "rb") as f:
+            print("Processing file %s" % rdb)
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                if record and record.encoding == 'linkedlist':
-                    print(record)
+                #if record and record.encoding in ('intset2', 'intset4', 'intset8'):
+                print(record)
 
