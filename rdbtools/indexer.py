@@ -154,18 +154,13 @@ class RedisMemoryAnalyzer(object):
     # enc_type is the type of object
     def get_memory_for_obj(self, f, enc_type) :
         if enc_type == REDIS_RDB_TYPE_STRING:
-            return self.get_memory_for_string(f)
+            return self.memory_for_string(f)
         elif enc_type == REDIS_RDB_TYPE_LIST:
-            # A redis list is just a sequence of strings
-            # We successively read strings from the stream and create a list from it
-            # The lists are in order i.e. the first string is the head, 
-            # and the last string is the tail of the list
-            length = read_length(f)
-            # self._callback.start_list(self._key, self._expiry, info={'encoding':'linkedlist' })
-            for count in range(0, length):
-                val = read_string(f)
-                # self._callback.rpush(self._key, val)
-            # self._callback.end_list(self._key, info={'encoding':'linkedlist' })
+            return self.memory_for_list_linkedlist(f)
+        elif enc_type == REDIS_RDB_TYPE_LIST_ZIPLIST:
+            self.read_ziplist(f)
+        elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
+            self.read_list_from_quicklist(f)
         elif enc_type == REDIS_RDB_TYPE_SET:
             # A redis list is just a sequence of strings
             # We successively read strings from the stream and create a set from it
@@ -176,6 +171,8 @@ class RedisMemoryAnalyzer(object):
                 val = read_string(f)
                 # self._callback.sadd(self._key, val)
             # self._callback.end_set(self._key)
+        elif enc_type == REDIS_RDB_TYPE_SET_INTSET:
+            self.read_intset(f)
         elif enc_type == REDIS_RDB_TYPE_ZSET or enc_type == REDIS_RDB_TYPE_ZSET_2 :
             length = read_length(f)
             # self._callback.start_sorted_set(self._key, length, self._expiry, info={'encoding':'skiplist'})
@@ -184,6 +181,8 @@ class RedisMemoryAnalyzer(object):
                 score = read_double(f) if enc_type == REDIS_RDB_TYPE_ZSET_2 else read_float(f)
                 # self._callback.zadd(self._key, score, val)
             # self._callback.end_sorted_set(self._key)
+        elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
+            self.read_zset_from_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH:
             length = read_length(f)
             # self._callback.start_hash(self._key, length, self._expiry, info={'encoding':'hashtable'})
@@ -194,16 +193,8 @@ class RedisMemoryAnalyzer(object):
             # self._callback.end_hash(self._key)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPMAP:
             self.read_zipmap(f)
-        elif enc_type == REDIS_RDB_TYPE_LIST_ZIPLIST:
-            self.read_ziplist(f)
-        elif enc_type == REDIS_RDB_TYPE_SET_INTSET:
-            self.read_intset(f)
-        elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
-            self.read_zset_from_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH_ZIPLIST:
-            return self.hash_from_ziplist(f)
-        elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
-            self.read_list_from_quicklist(f)
+            return self.memory_for_hash_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_MODULE:
             raise Exception('read_object', 'Unable to read Redis Modules RDB objects (key %s)' % self._key)
         elif enc_type == REDIS_RDB_TYPE_MODULE_2:
@@ -211,7 +202,7 @@ class RedisMemoryAnalyzer(object):
         else:
             raise Exception('read_object', 'Invalid object type %d for key %s' % (enc_type, self.current_key))
 
-    def get_memory_for_string(self, f):
+    def memory_for_string(self, f):
         metadata = read_string_metadata(f)
         size = self.top_level_object_overhead(self.current_key, self.expiry)
         size += self.sizeof_string(metadata.length, metadata.is_number, metadata.is_shared_number)
@@ -222,23 +213,32 @@ class RedisMemoryAnalyzer(object):
                 metadata.is_compressed, metadata.compressed_length
             )
 
-    def read_intset(self, f) :
-        raw_string = read_string(f)
-        buff = BytesIO(raw_string)
-        encoding = read_unsigned_int(buff)
-        num_entries = read_unsigned_int(buff)
-        # self._callback.start_set(self._key, num_entries, self._expiry, info={'encoding':'intset', 'sizeof_value':len(raw_string)})
-        for x in range(0, num_entries) :
-            if encoding == 8 :
-                entry = read_signed_long(buff)
-            elif encoding == 4 :
-                entry = read_signed_int(buff)
-            elif encoding == 2 :
-                entry = read_signed_short(buff)
-            else :
-                raise Exception('read_intset', 'Invalid encoding %d for key %s' % (encoding, self._key))
-            # self._callback.sadd(self._key, entry)
-        # self._callback.end_set(self._key)
+    def memory_for_list_linkedlist(self, f):
+        # A redis list is just a sequence of strings
+        # We successively read strings from the stream and create a list from it
+        # The lists are in order i.e. the first string is the head, 
+        # and the last string is the tail of the list
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        compressed_size = 0
+        any_element_compressed = False
+        length = read_length(f)
+        for count in range(0, length):
+            metadata = read_string_metadata(f)
+            if metadata.is_compressed:
+                any_element_compressed = True
+                compressed_size = metadata.compressed_length
+            size += self.sizeof_string(metadata.length, metadata.is_number, metadata.is_shared_number)
+        
+        size+= self.linkedlist_entry_overhead() * length
+        size+= self.linkedlist_overhead()
+        if self._redis_version_lt_4:
+            size += self.robj_overhead() * length
+
+        return MemoryRecord(
+                self.current_db, "list", self.current_key, size,
+                "linkedlist", length, metadata.length, self.expiry, 
+                any_element_compressed, compressed_size
+            )
 
     def read_ziplist(self, f):
         raw_string = read_string(f)
@@ -275,6 +275,24 @@ class RedisMemoryAnalyzer(object):
                 raise Exception('read_quicklist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
         # self._callback.end_list(self._key, info={'encoding': 'quicklist', 'zips': count, 'sizeof_value': total_size})
 
+    def read_intset(self, f) :
+        raw_string = read_string(f)
+        buff = BytesIO(raw_string)
+        encoding = read_unsigned_int(buff)
+        num_entries = read_unsigned_int(buff)
+        # self._callback.start_set(self._key, num_entries, self._expiry, info={'encoding':'intset', 'sizeof_value':len(raw_string)})
+        for x in range(0, num_entries) :
+            if encoding == 8 :
+                entry = read_signed_long(buff)
+            elif encoding == 4 :
+                entry = read_signed_int(buff)
+            elif encoding == 2 :
+                entry = read_signed_short(buff)
+            else :
+                raise Exception('read_intset', 'Invalid encoding %d for key %s' % (encoding, self._key))
+            # self._callback.sadd(self._key, entry)
+        # self._callback.end_set(self._key)
+
     def read_zset_from_ziplist(self, f) :
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
@@ -296,7 +314,7 @@ class RedisMemoryAnalyzer(object):
             raise Exception('read_zset_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self._key))
         # self._callback.end_sorted_set(self._key)
 
-    def hash_from_ziplist(self, f):
+    def memory_for_hash_ziplist(self, f):
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
         zlbytes = read_unsigned_int(buff)
@@ -340,7 +358,7 @@ class RedisMemoryAnalyzer(object):
         prev_length = read_unsigned_char(f)
         if prev_length == 254 :
             prev_length = read_unsigned_int(f)
-        
+
         entry_header = read_unsigned_char(f)
         if (entry_header >> 6) == 0 :
             length = entry_header & 0x3F
@@ -963,5 +981,6 @@ if __name__ == '__main__':
         with open(os.path.join(dumps_dir, rdb), "rb") as f:
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                print(record)
+                if record and record.encoding == 'linkedlist':
+                    print(record)
 
