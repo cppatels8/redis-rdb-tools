@@ -182,7 +182,7 @@ class RedisMemoryAnalyzer(object):
                 # self._callback.zadd(self._key, score, val)
             # self._callback.end_sorted_set(self._key)
         elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
-            self.read_zset_from_ziplist(f)
+            return self.memory_for_zset_ziplist(f)
         elif enc_type == REDIS_RDB_TYPE_HASH:
             length = read_length(f)
             # self._callback.start_hash(self._key, length, self._expiry, info={'encoding':'hashtable'})
@@ -293,9 +293,6 @@ class RedisMemoryAnalyzer(object):
         encoding = read_unsigned_int(buff)
         num_entries = read_unsigned_int(buff)
 
-        print(encoding)
-        print(num_entries)
-        
         size = self.top_level_object_overhead(self.current_key, self.expiry)
         size += len(raw_string)
 
@@ -309,7 +306,7 @@ class RedisMemoryAnalyzer(object):
                 False, -1
             )
 
-    def read_zset_from_ziplist(self, f) :
+    def memory_for_zset_ziplist(self, f) :
         raw_string = read_string(f)
         buff = BytesIO(raw_string)
         zlbytes = read_unsigned_int(buff)
@@ -318,17 +315,27 @@ class RedisMemoryAnalyzer(object):
         if (num_entries % 2) :
             raise Exception('read_zset_from_ziplist', "Expected even number of elements, but found %d for key %s" % (num_entries, self._key))
         num_entries = num_entries // 2
-        # self._callback.start_sorted_set(self._key, num_entries, self._expiry, info={'encoding':'ziplist', 'sizeof_value':len(raw_string)})
+        
+        size = self.top_level_object_overhead(self.current_key, self.expiry)
+        size += len(raw_string)
+
+        max_key_size = -1
+
         for x in range(0, num_entries) :
-            member = self.read_ziplist_entry(buff)
-            score = self.read_ziplist_entry(buff)
-            if isinstance(score, bytes) :
-                score = float(score)
-            # self._callback.zadd(self._key, score, member)
+            key_size = self.read_ziplist_entry_length(buff)
+            _ = self.read_ziplist_entry_length(buff)
+            if key_size > max_key_size:
+                max_key_size = key_size
+        
         zlist_end = read_unsigned_char(buff)
         if zlist_end != 255 : 
             raise Exception('read_zset_from_ziplist', "Invalid zip list end - %d for key %s" % (zlist_end, self._key))
-        # self._callback.end_sorted_set(self._key)
+
+        return MemoryRecord(
+                self.current_db, "zset", self.current_key, size,
+                "ziplist", num_entries, max_key_size, self.expiry, 
+                False, -1
+            )        
 
     def memory_for_hash_ziplist(self, f):
         raw_string = read_string(f)
@@ -1000,6 +1007,6 @@ if __name__ == '__main__':
             print("Processing file %s" % rdb)
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                #if record and record.encoding in ('intset2', 'intset4', 'intset8'):
-                print(record)
+                if record and record.encoding in ('ziplist') and record.type=='zset':
+                    print(record)
 
