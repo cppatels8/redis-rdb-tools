@@ -246,25 +246,40 @@ class RedisMemoryAnalyzer(object):
                 "ziplist", num_entries, max_value_size, 
                 self.expiry, 
                 False, -1
-            )        
+            )
 
-    # TODO: Implement this
+    # TODO: Implement this without reading the entire ziplist in memory
     def memory_for_list_quicklist(self, f):
-        count = read_length(f)
-        total_size = 0
-        for i in range(0, count):
+        num_ziplists = read_length(f)
+        size = self.quicklist_overhead(num_ziplists)
+        total_entries = 0
+        max_element_length = -1
+
+        for i in range(0, num_ziplists):
             raw_string = read_string(f)
-            total_size += len(raw_string)
+            size += len(raw_string)
+            
             buff = BytesIO(raw_string)
             zlbytes = read_unsigned_int(buff)
             tail_offset = read_unsigned_int(buff)
             num_entries = read_unsigned_short(buff)
+            total_entries += num_entries
+
             for x in range(0, num_entries):
-                self.read_ziplist_entry(buff)
-                # self._callback.rpush(self._key, self.read_ziplist_entry(buff))
+                length = self.read_ziplist_entry_length(buff)
+                if length > max_element_length:
+                    max_element_length = length
+                
             zlist_end = read_unsigned_char(buff)
             if zlist_end != 255:
                 raise Exception('read_quicklist', "Invalid zip list end - %d for key %s" % (zlist_end, self.current_key))
+
+        return MemoryRecord(
+                self.current_db, "list", self.current_key, size,
+                "quicklist", total_entries, max_element_length, 
+                self.expiry,
+                False, -1
+            )
 
     def memory_for_set_hashtable(self, f):
         # A redis list is just a sequence of strings
@@ -1084,6 +1099,6 @@ if __name__ == '__main__':
             print("Processing file %s" % rdb)
             records = RedisMemoryAnalyzer().get_memory_records(f)
             for record in records:
-                if record and record.encoding in ('skiplist') and record.type=='zset':
+                if record and record.encoding in ('quicklist'):
                     print(record)
 
