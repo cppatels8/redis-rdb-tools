@@ -11,6 +11,7 @@ tests/dumps/dump_sorted_sets.rdb
 tests/dumps/datascience_se.rdb
 
 .idea/*
+venv/
 venv2.6/
 venv2.7/
 venv3/
