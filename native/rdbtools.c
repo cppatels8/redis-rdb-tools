@@ -308,12 +308,27 @@ int rdbLoadObjectType(rio *rdb) {
     return type;
 }
 
-uint64_t next_power(uint64_t x) {
+uint64_t nextPower(uint64_t x) {
     uint64_t power = 1;
     while (power <= x) {
         power = power << 1;
     }
     return power;
+}
+
+int zsetRandomLevel() {
+    int level = 1;
+    int rint = rand();
+    while (rint < ZSKIPLIST_P * RAND_MAX) {
+        level += 1;
+        rint = rand();
+    }
+    if (level < ZSKIPLIST_MAXLEVEL) {
+        return level;
+    }
+    else {
+        return ZSKIPLIST_MAXLEVEL;
+    }
 }
 
 uint64_t rdbMemoryForString(rio *rdb) {
@@ -324,10 +339,13 @@ uint64_t rdbMemoryForString(rio *rdb) {
     if (isencoded) {
         switch(len) {
         case RDB_ENC_INT8:
+            rdbSkip(rdb, 1);
             return 0;
         case RDB_ENC_INT16:
+            rdbSkip(rdb, 2);
             return 8;
         case RDB_ENC_INT32:
+            rdbSkip(rdb, 4);
             return 8;
         case RDB_ENC_LZF:
             if ((clen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -364,24 +382,32 @@ uint64_t rdbMemoryForObject(int rdbtype, rio *rdb) {
     uint64_t len;
     unsigned int i;
     uint64_t memory = 0;
-    
+    double score;
+
     if (rdbtype == RDB_TYPE_STRING) {
         memory = rdbMemoryForString(rdb);
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
+        memory += LINKEDLIST_OVERHEAD;
+        memory += LINKEDLIST_ITEM_OVERHEAD * len;
+
         /* skip every single element of the list */
         while(len--) {
-            rdbSkipStringObject(rdb);
+            memory += rdbMemoryForString(rdb);
         }
+
     } else if (rdbtype == RDB_TYPE_SET) {
         /* Read Set value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
+        memory += HASHTABLE_OVERHEAD(len);
+        memory += HASHTABLE_ENTRY_OVERHEAD * len;
+
         /* Load every single element of the set */
         for (i = 0; i < len; i++) {
-            rdbSkipStringObject(rdb);
+            memory += rdbMemoryForString(rdb);
         }
     } else if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET) {
         /* Read list/set value. */
@@ -389,33 +415,45 @@ uint64_t rdbMemoryForObject(int rdbtype, rio *rdb) {
         
         if ((zsetlen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
         
+        memory += SKIPLIST_OVERHEAD(zsetlen);
+        if (rdbtype == RDB_TYPE_ZSET) {
+            memory += (SKIPLIST_ENTRY_OVERHEAD+4) * zsetlen;
+        }
+        else if (rdbtype == RDB_TYPE_ZSET_2) {
+            memory += (SKIPLIST_ENTRY_OVERHEAD+8) * zsetlen;
+        }
+
         /* Load every single element of the sorted set. */
         while(zsetlen--) {
-            double score;
-            rdbSkipStringObject(rdb);
+            memory += rdbMemoryForString(rdb);
 
             if (rdbtype == RDB_TYPE_ZSET_2) {
-                rdbLoadBinaryDoubleValue(rdb,&score);
+                rdbSkip(rdb,sizeof(double));
             } else {
+                /*
+                TODO: implement a skip function
+                For now, we just read the double and ignore it
+                */
                 rdbLoadDoubleValue(rdb,&score);
             }
         }
     } else if (rdbtype == RDB_TYPE_HASH) {
         uint64_t len;
-        int ret;
-        sds field, value;
-
+        
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-
-        /* Load every field and value into the ziplist */
+        memory += HASHTABLE_OVERHEAD(len);
+        memory += HASHTABLE_ENTRY_OVERHEAD * len;
+        
         while (len > 0) {
             len--;
-            rdbSkipStringObject(rdb);
-            rdbSkipStringObject(rdb);
+            memory += rdbMemoryForString(rdb);
+            memory += rdbMemoryForString(rdb);
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-        
+        memory += QUICKLIST_OVERHEAD;
+        memory += QUICKLIST_ITEM_OVERHEAD * len;
+
         while (len--) {
             memory += rdbMemoryForString(rdb);
         }
