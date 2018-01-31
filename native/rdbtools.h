@@ -91,6 +91,14 @@
 
 #define LONG_STR_SIZE      21          /* Bytes needed for long -> str + '\0' */
 
+#define SIZEOF_LONG 8
+#define SIZEOF_POINTER 8
+#define ROBJ_OVERHEAD (SIZEOF_POINTER + 1)
+#define HASHTABLE_ENTRY_OVERHEAD (2*SIZEOF_POINTER + 8)
+#define KEY_EXPIRY_OVERHEAD (HASHTABLE_ENTRY_OVERHEAD + 8)
+
+#define HASHTABLE_OVERHEAD(size) (4 + 7*SIZEOF_LONG + 4*SIZEOF_POINTER + next_power(size)*SIZEOF_POINTER*1.5)
+
 int rdbLoadType(rio *rdb);
 time_t rdbLoadTime(rio *rdb);
 uint64_t rdbLoadLen(rio *rdb, int *isencoded);
@@ -99,7 +107,6 @@ int rdbLoadObjectType(rio *rdb);
 int rdbLoad(char *filename);
 int rdbLoadObject(int type, rio *rdb);
 sds rdbLoadString(rio *rdb, size_t *lenptr);
-void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr);
 int rdbLoadBinaryDoubleValue(rio *rdb, double *val);
 int rdbLoadBinaryFloatValue(rio *rdb, float *val);
 int rdbLoadRio(rio *rdb);

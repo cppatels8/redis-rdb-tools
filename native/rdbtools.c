@@ -33,6 +33,7 @@
 #include "util.h"
 #include "zmalloc.h"
 
+#include <inttypes.h>
 #include <string.h> 
 #include <math.h>
 #include <sys/types.h>
@@ -226,9 +227,7 @@ void *rdbLoadLzfStringObject(rio *rdb, size_t *lenptr) {
 
     /* Load the compressed representation and uncompress it to target. */
     if (rioRead(rdb,c,clen) == 0) goto err;
-    if (lzf_decompress(c,clen,val,len) == 0) {
-        goto err;
-    }
+    if (lzf_decompress(c,clen,val,len) == 0) goto err;
     zfree(c);
     return val;
 
@@ -309,17 +308,68 @@ int rdbLoadObjectType(rio *rdb) {
     return type;
 }
 
+uint64_t next_power(uint64_t x) {
+    uint64_t power = 1;
+    while (power <= x) {
+        power = power << 1;
+    }
+    return power;
+}
+
+uint64_t rdbMemoryForString(rio *rdb) {
+    int isencoded;
+    uint64_t len, clen;
+
+    len = rdbLoadLen(rdb,&isencoded);
+    if (isencoded) {
+        switch(len) {
+        case RDB_ENC_INT8:
+            return 0;
+        case RDB_ENC_INT16:
+            return 8;
+        case RDB_ENC_INT32:
+            return 8;
+        case RDB_ENC_LZF:
+            if ((clen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+            if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+            rdbSkip(rdb, clen);
+            break;
+        default:
+            rdbExitReportCorruptRDB("Unknown RDB string encoding type %d",len);
+        }
+    }
+    else {
+        rdbSkip(rdb, len);
+    }
+    /* 
+    At this point, we have a string of length len 
+    For now, we implement a simplistic heuristic for memory
+    TODO: implement malloc overheads
+    */
+    return len + 1 + 16 + 1;
+}
+
+uint64_t topLevelObjectOverhead(uint64_t memoryForKey, int hasExpiry) {
+    uint64_t memory = HASHTABLE_ENTRY_OVERHEAD + ROBJ_OVERHEAD;
+    memory += memoryForKey;
+    if (hasExpiry) {
+        memory += KEY_EXPIRY_OVERHEAD;
+    }
+    return memory;
+}
+
 /* Load a Redis object of the specified type from the specified file.
  * On success a newly allocated object is returned, otherwise NULL. */
-void rdbSkipObject(int rdbtype, rio *rdb) {
+uint64_t rdbMemoryForObject(int rdbtype, rio *rdb) {
     uint64_t len;
     unsigned int i;
-
+    uint64_t memory = 0;
+    
     if (rdbtype == RDB_TYPE_STRING) {
-        rdbSkipStringObject(rdb);
+        memory = rdbMemoryForString(rdb);
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
-        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return;
+        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
         /* skip every single element of the list */
         while(len--) {
@@ -327,7 +377,7 @@ void rdbSkipObject(int rdbtype, rio *rdb) {
         }
     } else if (rdbtype == RDB_TYPE_SET) {
         /* Read Set value */
-        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return;
+        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
         /* Load every single element of the set */
         for (i = 0; i < len; i++) {
@@ -337,7 +387,7 @@ void rdbSkipObject(int rdbtype, rio *rdb) {
         /* Read list/set value. */
         uint64_t zsetlen;
         
-        zsetlen = rdbLoadLen(rdb,NULL);
+        if ((zsetlen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
         
         /* Load every single element of the sorted set. */
         while(zsetlen--) {
@@ -355,8 +405,7 @@ void rdbSkipObject(int rdbtype, rio *rdb) {
         int ret;
         sds field, value;
 
-        len = rdbLoadLen(rdb, NULL);
-        if (len == RDB_LENERR) return;
+        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
         /* Load every field and value into the ziplist */
         while (len > 0) {
@@ -365,10 +414,10 @@ void rdbSkipObject(int rdbtype, rio *rdb) {
             rdbSkipStringObject(rdb);
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
-        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return;
+        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
         
         while (len--) {
-            rdbSkipStringObject(rdb);
+            memory += rdbMemoryForString(rdb);
         }
     } else if (rdbtype == RDB_TYPE_HASH_ZIPMAP  ||
                rdbtype == RDB_TYPE_LIST_ZIPLIST ||
@@ -376,10 +425,11 @@ void rdbSkipObject(int rdbtype, rio *rdb) {
                rdbtype == RDB_TYPE_ZSET_ZIPLIST ||
                rdbtype == RDB_TYPE_HASH_ZIPLIST)
     {
-        rdbSkipStringObject(rdb);
+        memory = rdbMemoryForString(rdb);
     } else {
         rdbExitReportCorruptRDB("Unknown RDB encoding type %d",rdbtype);
     }
+    return memory;
 }
 
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
@@ -389,22 +439,12 @@ int rdbLoadRio(rio *rdb) {
     int type, rdbver;
     char buf[1024];
     long long expiretime;
+    uint64_t memory;
 
-    // rdb->update_cksum = rdbLoadProgressCallback;
     rdb->max_processing_chunk = 16384;
     if (rioRead(rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
-    // if (memcmp(buf,"REDIS",5) != 0) {
-    //     serverLog(LL_WARNING,"Wrong signature trying to load DB from file");
-    //     errno = EINVAL;
-    //     return C_ERR;
-    // }
     rdbver = atoi(buf+5);
-    // if (rdbver < 1 || rdbver > RDB_VERSION) {
-    //     serverLog(LL_WARNING,"Can't handle RDB format version %d",rdbver);
-    //     errno = EINVAL;
-    //     return C_ERR;
-    // }
 
     while(1) {
         expiretime = -1;
@@ -447,9 +487,9 @@ int rdbLoadRio(rio *rdb) {
 
         /* Read key */
         sds key = rdbLoadString(rdb, NULL);
-        printf("%s\n", key);
-        /* Read value */
-        rdbSkipObject(type,rdb);
+        printf("%s,", key);
+        memory = rdbMemoryForObject(type,rdb);
+        printf("%" PRIu64 "\n", memory);
     }
 
     return 0;
