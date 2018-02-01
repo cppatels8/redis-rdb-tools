@@ -27,7 +27,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "fmacros.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,7 +40,6 @@
 #include <errno.h>
 
 #include "util.h"
-#include "sha1.h"
 
 /* Glob-style pattern matching. */
 int stringmatchlen(const char *pattern, int patternLen,
@@ -168,65 +166,6 @@ int stringmatchlen(const char *pattern, int patternLen,
 
 int stringmatch(const char *pattern, const char *string, int nocase) {
     return stringmatchlen(pattern,strlen(pattern),string,strlen(string),nocase);
-}
-
-/* Convert a string representing an amount of memory into the number of
- * bytes, so for instance memtoll("1Gb") will return 1073741824 that is
- * (1024*1024*1024).
- *
- * On parsing error, if *err is not NULL, it's set to 1, otherwise it's
- * set to 0. On error the function return value is 0, regardless of the
- * fact 'err' is NULL or not. */
-long long memtoll(const char *p, int *err) {
-    const char *u;
-    char buf[128];
-    long mul; /* unit multiplier */
-    long long val;
-    unsigned int digits;
-
-    if (err) *err = 0;
-
-    /* Search the first non digit character. */
-    u = p;
-    if (*u == '-') u++;
-    while(*u && isdigit(*u)) u++;
-    if (*u == '\0' || !strcasecmp(u,"b")) {
-        mul = 1;
-    } else if (!strcasecmp(u,"k")) {
-        mul = 1000;
-    } else if (!strcasecmp(u,"kb")) {
-        mul = 1024;
-    } else if (!strcasecmp(u,"m")) {
-        mul = 1000*1000;
-    } else if (!strcasecmp(u,"mb")) {
-        mul = 1024*1024;
-    } else if (!strcasecmp(u,"g")) {
-        mul = 1000L*1000*1000;
-    } else if (!strcasecmp(u,"gb")) {
-        mul = 1024L*1024*1024;
-    } else {
-        if (err) *err = 1;
-        return 0;
-    }
-
-    /* Copy the digits into a buffer, we'll use strtoll() to convert
-     * the digit (without the unit) into a number. */
-    digits = u-p;
-    if (digits >= sizeof(buf)) {
-        if (err) *err = 1;
-        return 0;
-    }
-    memcpy(buf,p,digits);
-    buf[digits] = '\0';
-
-    char *endptr;
-    errno = 0;
-    val = strtoll(buf,&endptr,10);
-    if ((val == 0 && errno == EINVAL) || *endptr != '\0') {
-        if (err) *err = 1;
-        return 0;
-    }
-    return val*mul;
 }
 
 /* Return the number of digits of 'v' when converted to string in radix 10.
@@ -534,143 +473,6 @@ int ld2string(char *buf, size_t len, long double value, int humanfriendly) {
     }
     buf[l] = '\0';
     return l;
-}
-
-/* Generate the Redis "Run ID", a SHA1-sized random number that identifies a
- * given execution of Redis, so that if you are talking with an instance
- * having run_id == A, and you reconnect and it has run_id == B, you can be
- * sure that it is either a different instance or it was restarted. */
-void getRandomHexChars(char *p, unsigned int len) {
-    char *charset = "0123456789abcdef";
-    unsigned int j;
-
-    /* Global state. */
-    static int seed_initialized = 0;
-    static unsigned char seed[20]; /* The SHA1 seed, from /dev/urandom. */
-    static uint64_t counter = 0; /* The counter we hash with the seed. */
-
-    if (!seed_initialized) {
-        /* Initialize a seed and use SHA1 in counter mode, where we hash
-         * the same seed with a progressive counter. For the goals of this
-         * function we just need non-colliding strings, there are no
-         * cryptographic security needs. */
-        FILE *fp = fopen("/dev/urandom","r");
-        if (fp && fread(seed,sizeof(seed),1,fp) == 1)
-            seed_initialized = 1;
-        if (fp) fclose(fp);
-    }
-
-    if (seed_initialized) {
-        while(len) {
-            unsigned char digest[20];
-            SHA1_CTX ctx;
-            unsigned int copylen = len > 20 ? 20 : len;
-
-            SHA1Init(&ctx);
-            SHA1Update(&ctx, seed, sizeof(seed));
-            SHA1Update(&ctx, (unsigned char*)&counter,sizeof(counter));
-            SHA1Final(digest, &ctx);
-            counter++;
-
-            memcpy(p,digest,copylen);
-            /* Convert to hex digits. */
-            for (j = 0; j < copylen; j++) p[j] = charset[p[j] & 0x0F];
-            len -= copylen;
-            p += copylen;
-        }
-    } else {
-        /* If we can't read from /dev/urandom, do some reasonable effort
-         * in order to create some entropy, since this function is used to
-         * generate run_id and cluster instance IDs */
-        char *x = p;
-        unsigned int l = len;
-        struct timeval tv;
-        pid_t pid = getpid();
-
-        /* Use time and PID to fill the initial array. */
-        gettimeofday(&tv,NULL);
-        if (l >= sizeof(tv.tv_usec)) {
-            memcpy(x,&tv.tv_usec,sizeof(tv.tv_usec));
-            l -= sizeof(tv.tv_usec);
-            x += sizeof(tv.tv_usec);
-        }
-        if (l >= sizeof(tv.tv_sec)) {
-            memcpy(x,&tv.tv_sec,sizeof(tv.tv_sec));
-            l -= sizeof(tv.tv_sec);
-            x += sizeof(tv.tv_sec);
-        }
-        if (l >= sizeof(pid)) {
-            memcpy(x,&pid,sizeof(pid));
-            l -= sizeof(pid);
-            x += sizeof(pid);
-        }
-        /* Finally xor it with rand() output, that was already seeded with
-         * time() at startup, and convert to hex digits. */
-        for (j = 0; j < len; j++) {
-            p[j] ^= rand();
-            p[j] = charset[p[j] & 0x0F];
-        }
-    }
-}
-
-/* Given the filename, return the absolute path as an SDS string, or NULL
- * if it fails for some reason. Note that "filename" may be an absolute path
- * already, this will be detected and handled correctly.
- *
- * The function does not try to normalize everything, but only the obvious
- * case of one or more "../" appearning at the start of "filename"
- * relative path. */
-sds getAbsolutePath(char *filename) {
-    char cwd[1024];
-    sds abspath;
-    sds relpath = sdsnew(filename);
-
-    relpath = sdstrim(relpath," \r\n\t");
-    if (relpath[0] == '/') return relpath; /* Path is already absolute. */
-
-    /* If path is relative, join cwd and relative path. */
-    if (getcwd(cwd,sizeof(cwd)) == NULL) {
-        sdsfree(relpath);
-        return NULL;
-    }
-    abspath = sdsnew(cwd);
-    if (sdslen(abspath) && abspath[sdslen(abspath)-1] != '/')
-        abspath = sdscat(abspath,"/");
-
-    /* At this point we have the current path always ending with "/", and
-     * the trimmed relative path. Try to normalize the obvious case of
-     * trailing ../ elements at the start of the path.
-     *
-     * For every "../" we find in the filename, we remove it and also remove
-     * the last element of the cwd, unless the current cwd is "/". */
-    while (sdslen(relpath) >= 3 &&
-           relpath[0] == '.' && relpath[1] == '.' && relpath[2] == '/')
-    {
-        sdsrange(relpath,3,-1);
-        if (sdslen(abspath) > 1) {
-            char *p = abspath + sdslen(abspath)-2;
-            int trimlen = 1;
-
-            while(*p != '/') {
-                p--;
-                trimlen++;
-            }
-            sdsrange(abspath,0,-(trimlen+1));
-        }
-    }
-
-    /* Finally glue the two parts together. */
-    abspath = sdscatsds(abspath,relpath);
-    sdsfree(relpath);
-    return abspath;
-}
-
-/* Return true if the specified path is just a file basename without any
- * relative or absolute path. This function just checks that no / or \
- * character exists inside the specified path, that's enough in the
- * environments where Redis runs. */
-int pathIsBaseName(char *path) {
-    return strchr(path,'/') == NULL && strchr(path,'\\') == NULL;
 }
 
 #ifdef REDIS_TEST
