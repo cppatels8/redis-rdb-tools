@@ -66,21 +66,21 @@ void rdbCheckThenExit(int linenum, char *reason, ...) {
 /* Load a "type" in RDB format, that is a one byte unsigned integer.
  * This function is not only used to load object types, but also special
  * "types" like the end-of-file type, the EXPIRE type, and so forth. */
-int rdbLoadType(rio *rdb) {
+int rdbLoadType(FILE *rdb) {
     unsigned char type;
-    if (rioRead(rdb,&type,1) == 0) return -1;
+    if (fread(&type, 1, 1, rdb) == 0) return -1;
     return type;
 }
 
-time_t rdbLoadTime(rio *rdb) {
+time_t rdbLoadTime(FILE *rdb) {
     int32_t t32;
-    if (rioRead(rdb,&t32,4) == 0) return -1;
+    if (fread(&t32,4, 1, rdb) == 0) return -1;
     return (time_t)t32;
 }
 
-long long rdbLoadMillisecondTime(rio *rdb) {
+long long rdbLoadMillisecondTime(FILE *rdb) {
     int64_t t64;
-    if (rioRead(rdb,&t64,8) == 0) return -1;
+    if (fread(&t64, 8, 1, rdb) == 0) return -1;
     return (long long)t64;
 }
 
@@ -93,12 +93,12 @@ long long rdbLoadMillisecondTime(rio *rdb) {
  * encodings.
  *
  * The function returns -1 on error, 0 on success. */
-int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
+int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr) {
     unsigned char buf[2];
     int type;
 
     if (isencoded) *isencoded = 0;
-    if (rioRead(rdb,buf,1) == 0) return -1;
+    if (fread(buf,1, 1, rdb) == 0) return -1;
     type = (buf[0]&0xC0)>>6;
     if (type == RDB_ENCVAL) {
         /* Read a 6 bit encoding type. */
@@ -109,17 +109,17 @@ int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
         *lenptr = buf[0]&0x3F;
     } else if (type == RDB_14BITLEN) {
         /* Read a 14 bit len. */
-        if (rioRead(rdb,buf+1,1) == 0) return -1;
+        if (fread(buf+1, 1, 1, rdb) == 0) return -1;
         *lenptr = ((buf[0]&0x3F)<<8)|buf[1];
     } else if (buf[0] == RDB_32BITLEN) {
         /* Read a 32 bit len. */
         uint32_t len;
-        if (rioRead(rdb,&len,4) == 0) return -1;
+        if (fread(&len,4, 1, rdb) == 0) return -1;
         *lenptr = ntohl(len);
     } else if (buf[0] == RDB_64BITLEN) {
         /* Read a 64 bit len. */
         uint64_t len;
-        if (rioRead(rdb,&len,8) == 0) return -1;
+        if (fread(&len,8, 1, rdb) == 0) return -1;
         /*TODO: Fix endianess over here */
         // *lenptr = ntohu64(len);
         *lenptr = len;
@@ -135,7 +135,7 @@ int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
  * from the RDB stream, signaling an error by returning RDB_LENERR
  * (since it is a too large count to be applicable in any Redis data
  * structure). */
-uint64_t rdbLoadLen(rio *rdb, int *isencoded) {
+uint64_t rdbLoadLen(FILE *rdb, int *isencoded) {
     uint64_t len;
 
     if (rdbLoadLenByRef(rdb,isencoded,&len) == -1) return RDB_LENERR;
@@ -145,22 +145,22 @@ uint64_t rdbLoadLen(rio *rdb, int *isencoded) {
 /* Loads an integer-encoded object with the specified encoding type "enctype".
  * The returned value changes according to the flags, see
  * rdbGenerincLoadStringObject() for more info. */
-sds rdbLoadIntegerObject(rio *rdb, int enctype, size_t *lenptr) {
+sds rdbLoadIntegerObject(FILE *rdb, int enctype, size_t *lenptr) {
     
     unsigned char enc[4];
     long long val;
 
     if (enctype == RDB_ENC_INT8) {
-        if (rioRead(rdb,enc,1) == 0) return NULL;
+        if (fread(enc,1, 1, rdb) == 0) return NULL;
         val = (signed char)enc[0];
     } else if (enctype == RDB_ENC_INT16) {
         uint16_t v;
-        if (rioRead(rdb,enc,2) == 0) return NULL;
+        if (fread(enc,2, 1, rdb) == 0) return NULL;
         v = enc[0]|(enc[1]<<8);
         val = (int16_t)v;
     } else if (enctype == RDB_ENC_INT32) {
         uint32_t v;
-        if (rioRead(rdb,enc,4) == 0) return NULL;
+        if (fread(enc,4, 1, rdb) == 0) return NULL;
         v = enc[0]|(enc[1]<<8)|(enc[2]<<16)|(enc[3]<<24);
         val = (int32_t)v;
     } else {
@@ -176,19 +176,20 @@ sds rdbLoadIntegerObject(rio *rdb, int enctype, size_t *lenptr) {
     return p;
 }
 
-int rdbSkip(rio *rdb, off_t size) {
-    return rioSeek(rdb, size);
+int rdbSkip(FILE *rdb, off_t size) {
+    return fseek(rdb, size, SEEK_CUR);
 }
-int rdbSkipIntegerObject(rio *rdb) {
-    return rioSeek(rdb, 4);
+
+int rdbSkipIntegerObject(FILE *rdb) {
+    return rdbSkip(rdb, 4);
 }
-int rdbSkipLzfStringObject(rio *rdb) {
+int rdbSkipLzfStringObject(FILE *rdb) {
     uint64_t len, clen;
     clen = rdbLoadLen(rdb,NULL);
     len = rdbLoadLen(rdb,NULL);
     return rdbSkip(rdb, clen);
 }
-int rdbSkipStringObject(rio *rdb) {
+int rdbSkipStringObject(FILE *rdb) {
     int isencoded;
     uint64_t len;
 
@@ -213,7 +214,7 @@ int rdbSkipStringObject(rio *rdb) {
 /* Load an LZF compressed string in RDB format. The returned value
  * changes according to 'flags'. For more info check the
  * rdbGenericLoadStringObject() function. */
-void *rdbLoadLzfStringObject(rio *rdb, size_t *lenptr) {
+void *rdbLoadLzfStringObject(FILE *rdb, size_t *lenptr) {
     uint64_t len, clen;
     unsigned char *c = NULL;
     char *val = NULL;
@@ -225,7 +226,7 @@ void *rdbLoadLzfStringObject(rio *rdb, size_t *lenptr) {
     val = sdsnewlen(NULL,len);
 
     /* Load the compressed representation and uncompress it to target. */
-    if (rioRead(rdb,c,clen) == 0) goto err;
+    if (fread(c,clen, 1, rdb) == 0) goto err;
     if (lzf_decompress(c,clen,val,len) == 0) goto err;
     zfree(c);
     return val;
@@ -238,7 +239,7 @@ err:
 
 /* Load a SDS string from an RDB file according to flags:
  */
-sds rdbLoadString(rio *rdb, size_t *lenptr) {
+sds rdbLoadString(FILE *rdb, size_t *lenptr) {
     int isencoded;
     uint64_t len;
 
@@ -258,7 +259,7 @@ sds rdbLoadString(rio *rdb, size_t *lenptr) {
 
     void *buf = sdsnewlen(NULL,len);
     if (lenptr) *lenptr = len;
-    if (len && rioRead(rdb,buf,len) == 0) {
+    if (len && fread(buf,len, 1, rdb) == 0) {
         sdsfree(buf);
         return NULL;
     }
@@ -266,17 +267,17 @@ sds rdbLoadString(rio *rdb, size_t *lenptr) {
 }
 
 /* For information about double serialization check rdbSaveDoubleValue() */
-int rdbLoadDoubleValue(rio *rdb, double *val) {
+int rdbLoadDoubleValue(FILE *rdb, double *val) {
     char buf[256];
     unsigned char len;
 
-    if (rioRead(rdb,&len,1) == 0) return -1;
+    if (fread(&len,1, 1, rdb) == 0) return -1;
     switch(len) {
     case 255: *val = -1.0/0.0; return 0;
     case 254: *val = 1.0/0.0; return 0;
     case 253: *val = 0.0/0.0; return 0;
     default:
-        if (rioRead(rdb,buf,len) == 0) return -1;
+        if (fread(buf,len, 1, rdb) == 0) return -1;
         buf[len] = '\0';
         sscanf(buf, "%lg", val);
         return 0;
@@ -285,7 +286,7 @@ int rdbLoadDoubleValue(rio *rdb, double *val) {
 
 /* Use rdbLoadType() to load a TYPE in RDB format, but returns -1 if the
  * type is not specifically a valid Object Type. */
-int rdbLoadObjectType(rio *rdb) {
+int rdbLoadObjectType(FILE *rdb) {
     int type;
     if ((type = rdbLoadType(rdb)) == -1) return -1;
     if (!rdbIsObjectType(type)) return -1;
@@ -315,7 +316,7 @@ int zsetRandomLevel() {
     }
 }
 
-uint64_t rdbMemoryForString(rio *rdb) {
+uint64_t rdbMemoryForString(FILE *rdb) {
     int isencoded;
     uint64_t len, clen;
 
@@ -362,7 +363,7 @@ uint64_t topLevelObjectOverhead(uint64_t memoryForKey, int hasExpiry) {
 
 /* Load a Redis object of the specified type from the specified file.
  * On success a newly allocated object is returned, otherwise NULL. */
-uint64_t rdbMemoryForObject(int rdbtype, rio *rdb) {
+uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
     uint64_t len;
     unsigned int i;
     uint64_t memory = 0;
@@ -454,17 +455,16 @@ uint64_t rdbMemoryForObject(int rdbtype, rio *rdb) {
     return memory;
 }
 
-/* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
+/* Load an RDB file 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly. */
-int rdbLoadRio(rio *rdb) {
+int rdbLoadFromFile(FILE *rdb) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
     long long expiretime;
     uint64_t memory;
 
-    rdb->max_processing_chunk = 16384;
-    if (rioRead(rdb,buf,9) == 0) goto eoferr;
+    if (fread(buf,9, 1, rdb) == 0) goto eoferr;
     buf[9] = '\0';
     rdbver = atoi(buf+5);
 
@@ -538,19 +538,14 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return -1; /* Just to avoid warning */
 }
 
-/* Like rdbLoadRio() but takes a filename instead of a rio stream. The
- * filename is open for reading and a rio stream object created in order
- * to do the actual loading. Moreover the ETA displayed in the INFO
- * output is initialized and finalized.
+/* Like rdbLoadFromFile() but takes a filename instead of a FILE pointer. 
  */
 int rdbLoad(char *filename) {
     FILE *fp;
-    rio rdb;
     int retval;
 
     if ((fp = fopen(filename,"r")) == NULL) return -1;
-    rioInitWithFile(&rdb,fp);
-    retval = rdbLoadRio(&rdb);
+    retval = rdbLoadFromFile(fp);
     fclose(fp);
     return retval;
 }

@@ -2,7 +2,7 @@
 #define __RDBTOOLS_H
 
 #include <stdio.h>
-#include "rio.h"
+#include "sds.h"
 
 /* The current RDB version. When the format changes in a way that is no longer
  * backward compatible this number gets incremented. */
@@ -111,16 +111,15 @@
 #define SKIPLIST_ENTRY_OVERHEAD (HASHTABLE_ENTRY_OVERHEAD + 2*SIZEOF_LONG + 8 + (SIZEOF_POINTER + 8) * zsetRandomLevel())
 
 
-int rdbLoadType(rio *rdb);
-time_t rdbLoadTime(rio *rdb);
-uint64_t rdbLoadLen(rio *rdb, int *isencoded);
-int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr);
-int rdbLoadObjectType(rio *rdb);
+int rdbLoadType(FILE *rdb);
+time_t rdbLoadTime(FILE *rdb);
+uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
+int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr);
+int rdbLoadObjectType(FILE *rdb);
 int rdbLoad(char *filename);
-int rdbLoadObject(int type, rio *rdb);
-sds rdbLoadString(rio *rdb, size_t *lenptr);
-int rdbLoadBinaryDoubleValue(rio *rdb, double *val);
-int rdbLoadBinaryFloatValue(rio *rdb, float *val);
-int rdbLoadRio(rio *rdb);
+sds rdbLoadString(FILE *rdb, size_t *lenptr);
+int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
+int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
+int rdbLoadFromFile(FILE *rdb);
 
 #endif
