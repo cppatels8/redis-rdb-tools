@@ -28,7 +28,6 @@
  */
 
 #include "lzf.h"    /* LZF compression library */
-#include "endianconv.h"
 #include "rdbtools.h"
 #include "util.h"
 #include "zmalloc.h"
@@ -282,21 +281,6 @@ int rdbLoadDoubleValue(rio *rdb, double *val) {
         sscanf(buf, "%lg", val);
         return 0;
     }
-}
-
-/* Loads a double from RDB 8 or greater. See rdbSaveBinaryDoubleValue() for
- * more info. On error -1 is returned, otherwise 0. */
-int rdbLoadBinaryDoubleValue(rio *rdb, double *val) {
-    if (rioRead(rdb,val,sizeof(*val)) == 0) return -1;
-    memrev64ifbe(val);
-    return 0;
-}
-
-/* Like rdbLoadBinaryDoubleValue() but single precision. */
-int rdbLoadBinaryFloatValue(rio *rdb, float *val) {
-    if (rioRead(rdb,val,sizeof(*val)) == 0) return -1;
-    memrev32ifbe(val);
-    return 0;
 }
 
 /* Use rdbLoadType() to load a TYPE in RDB format, but returns -1 if the
