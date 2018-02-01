@@ -523,6 +523,22 @@ int rdbLoadRio(rio *rdb) {
             continue; /* Read type again. */
         }
 
+        /* We have the key and memory
+        *  Need the following:
+        *   expiry -> we have the absolute unix time. 
+        *       We want "expires in 4 hours" instead of "expires at such and such time"
+        *       To do so, we need to store the snapshot time ("ctime" aux field),
+        *       and then subtract this from the absolute expiry time in rdb
+        *
+        *   database number => trivial
+        *   data type => trivial
+        *   encoding => trivial
+        *   savingsIfCompressed => if compressed (length - compressed length) else 0
+        *   length => simple for objects, more complex for embedded objects
+        *   length_of_largest_element => very involved for embedded objects...
+        *       ... but it is useless for embedded objects anyways, so we can skip.
+        *   
+        */
         /* Read key */
         sds key = rdbLoadString(rdb, NULL);
         printf("%s,", key);
