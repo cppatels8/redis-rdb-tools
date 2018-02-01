@@ -426,18 +426,77 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
     return memory;
 }
 
+int getDataTypeAndEncoding(int type, char **logicalType, char **encoding) {
+    if (type == RDB_TYPE_STRING) {
+        *logicalType = "string";
+        *encoding = "string";
+    }
+    else if (type == RDB_TYPE_LIST) {
+        *logicalType = "list";
+        *encoding = "linkedlist";
+    } 
+    else if (type == RDB_TYPE_LIST_ZIPLIST) {
+        *logicalType = "list";
+        *encoding = "ziplist";
+    }
+    else if (type == RDB_TYPE_LIST_QUICKLIST) {
+        *logicalType = "list";
+        *encoding = "quicklist";
+    }
+    else if (type == RDB_TYPE_SET) {
+        *logicalType = "set";
+        *encoding = "hashtable";
+    }
+    else if (type == RDB_TYPE_SET_INTSET) {
+        *logicalType = "set";
+        *encoding = "intset";
+    }
+    else if (type == RDB_TYPE_ZSET_2) {
+        *logicalType = "zset";
+        *encoding = "skiplist";
+    }
+    else if (type == RDB_TYPE_ZSET) {
+        *logicalType = "zset";
+        *encoding = "skiplist";
+    }
+    else if (type == RDB_TYPE_ZSET_ZIPLIST) {
+        *logicalType = "zset";
+        *encoding = "ziplist";
+    }
+    else if (type == RDB_TYPE_HASH) {
+        *logicalType = "hash";
+        *encoding = "hashtable";
+    }
+    else if (type == RDB_TYPE_HASH_ZIPLIST) {
+        *logicalType = "hash";
+        *encoding = "ziplist";
+    }
+    else if (type == RDB_TYPE_HASH_ZIPMAP) {
+        *logicalType = "hash";
+        *encoding = "zipmap";
+    }
+    else {
+        return -1;
+    }
+
+    return 0;
+}
 /* Load an RDB file 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly. */
-int rdbLoadFromFile(FILE *rdb) {
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
+    char **dataType, **encoding;
     long long expiretime;
     uint64_t memory;
 
     if (fread(buf,9, 1, rdb) == 0) goto eoferr;
     buf[9] = '\0';
     rdbver = atoi(buf+5);
+
+    dataType = zmalloc(20);
+    encoding = zmalloc(20);
 
     while(1) {
         expiretime = -1;
@@ -466,7 +525,7 @@ int rdbLoadFromFile(FILE *rdb) {
             /* EOF: End of file, exit the main loop. */
             break;
         } else if (type == RDB_OPCODE_SELECTDB) {
-            rdbLoadLen(rdb,NULL);
+            dbid = rdbLoadLen(rdb,NULL);
             continue;
         } else if (type == RDB_OPCODE_RESIZEDB) {
             rdbLoadLen(rdb,NULL);
@@ -496,12 +555,13 @@ int rdbLoadFromFile(FILE *rdb) {
         */
         /* Read key */
         sds key = rdbLoadString(rdb, NULL);
-        printf("%s,", key);
-        sdsfree(key);
         memory = rdbMemoryForObject(type,rdb);
-        printf("%" PRIu64 "\n", memory);
+        getDataTypeAndEncoding(type, dataType, encoding);
+        fprintf(csv, "%llu,%s,%s,%llu,%s\n", dbid, *dataType, key, memory, *encoding);
+        sdsfree(key);
     }
-
+    zfree(dataType);
+    zfree(encoding);
     return 0;
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */
@@ -510,18 +570,18 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return -1; /* Just to avoid warning */
 }
 
-/* Like rdbLoadFromFile() but takes a filename instead of a FILE pointer. 
- */
-int rdbLoad(char *filename) {
-    FILE *fp;
+int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
+    FILE *fp, *out;
     int retval;
 
-    if ((fp = fopen(filename,"r")) == NULL) return -1;
-    retval = rdbLoadFromFile(fp);
+    if ((fp = fopen(rdbFile,"rb")) == NULL) return -1;
+    if ((out = fopen(csvFile,"w")) == NULL) return -1;
+    retval = rdbMemoryAnalysisInternal(fp, out);
     fclose(fp);
+    fclose(out);
     return retval;
 }
 
 int main(int argc, char **argv) {
-    rdbLoad("askubuntu.rdb");
+    return rdbMemoryAnalysis("askubuntu.rdb", "askubuntu_memory.csv");
 }

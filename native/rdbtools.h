@@ -116,10 +116,10 @@ time_t rdbLoadTime(FILE *rdb);
 uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
 int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr);
 int rdbLoadObjectType(FILE *rdb);
-int rdbLoad(char *filename);
+int rdbMemoryAnalysis(char *rdb, char *csv);
 sds rdbLoadString(FILE *rdb, size_t *lenptr);
 int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
 int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
-int rdbLoadFromFile(FILE *rdb);
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv);
 
 #endif
