@@ -126,7 +126,7 @@ typedef struct MemoryEntry {
         Memory used in bytes
     */
     uint64_t bytes;
-    
+
     /*
         For string, this is the length of the string
         For hash, set, list, sortedset, this is the number of elements
@@ -181,7 +181,7 @@ uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
 int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr);
 int rdbLoadObjectType(FILE *rdb);
 int rdbMemoryAnalysis(char *rdb, char *csv);
-sds rdbLoadString(FILE *rdb, size_t *lenptr);
+sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed);
 int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
 int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv);

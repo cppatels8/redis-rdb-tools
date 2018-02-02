@@ -116,7 +116,7 @@ uint64_t rdbLoadLen(FILE *rdb, int *isencoded) {
 /* Loads an integer-encoded object with the specified encoding type "enctype".
  * The returned value changes according to the flags, see
  * rdbGenerincLoadStringObject() for more info. */
-sds rdbLoadIntegerObject(FILE *rdb, int enctype, size_t *lenptr) {
+sds rdbLoadIntegerObject(FILE *rdb, int enctype) {
     
     unsigned char enc[4];
     long long val;
@@ -141,7 +141,6 @@ sds rdbLoadIntegerObject(FILE *rdb, int enctype, size_t *lenptr) {
 
     char buf[LONG_STR_SIZE], *p;
     int len = ll2string(buf,sizeof(buf),val);
-    if (lenptr) *lenptr = len;
     p = sdsnewlen(NULL,len);
     memcpy(p,buf,len);
     return p;
@@ -185,7 +184,7 @@ int rdbSkipStringObject(FILE *rdb) {
 /* Load an LZF compressed string in RDB format. The returned value
  * changes according to 'flags'. For more info check the
  * rdbGenericLoadStringObject() function. */
-void *rdbLoadLzfStringObject(FILE *rdb, size_t *lenptr) {
+void *rdbLoadLzfStringObject(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
     uint64_t len, clen;
     unsigned char *c = NULL;
     char *val = NULL;
@@ -200,6 +199,11 @@ void *rdbLoadLzfStringObject(FILE *rdb, size_t *lenptr) {
     if (fread(c,clen, 1, rdb) == 0) goto err;
     if (lzf_decompress(c,clen,val,len) == 0) goto err;
     zfree(c);
+    *savingsIfCompressed = len - clen;
+    /*
+    TODO refine this heuristic
+    */
+    *memory =  len + 1 + 16 + 1;
     return val;
 
 err:
@@ -208,32 +212,42 @@ err:
     return NULL;
 }
 
-/* Load a SDS string from an RDB file according to flags:
+/* Load a SDS string from an RDB file.
+ * Also calculates memory in bytes, 
+ * and savings if the string were to be stored compressed 
  */
-sds rdbLoadString(FILE *rdb, size_t *lenptr) {
+sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
     int isencoded;
     uint64_t len;
+    
+    *savingsIfCompressed = 0;
 
     len = rdbLoadLen(rdb,&isencoded);
     if (isencoded) {
         switch(len) {
         case RDB_ENC_INT8:
+            *memory = 0;
         case RDB_ENC_INT16:
         case RDB_ENC_INT32:
-            return rdbLoadIntegerObject(rdb,len, lenptr);
+            *memory = 8;
+            return rdbLoadIntegerObject(rdb, len);
         case RDB_ENC_LZF:
-            return rdbLoadLzfStringObject(rdb,lenptr);
+            return rdbLoadLzfStringObject(rdb, memory, savingsIfCompressed);
         default:
             rdbExitReportCorruptRDB("Unknown RDB string encoding type %d",len);
         }
     }
 
     void *buf = sdsnewlen(NULL,len);
-    if (lenptr) *lenptr = len;
+    
     if (len && fread(buf,len, 1, rdb) == 0) {
         sdsfree(buf);
         return NULL;
     }
+    /*
+    TODO: refine this metric
+    */
+    *memory = len + 1 + 16 + 1;
     return buf;
 }
 
@@ -595,7 +609,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
     char *encoding;
     unsigned char header[11];
     long long expiretime;
-    uint64_t memory;
+    uint64_t memory, savingsIfCompressed;
 
     if (fread(buf,9, 1, rdb) == 0) goto eoferr;
     buf[9] = '\0';
@@ -657,7 +671,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
         *   
         */
         /* Read key */
-        sds key = rdbLoadString(rdb, NULL);
+        sds key = rdbLoadString(rdb, &memory, &savingsIfCompressed);
         memory = rdbMemoryForObject(type,rdb);
         getDataTypeAndEncoding(type, &dataType, &encoding);
         fprintf(csv, "%llu,%s,%s,%llu,%s\n", dbid, dataType, key, memory, encoding);
