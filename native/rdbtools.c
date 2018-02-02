@@ -287,6 +287,110 @@ int zsetRandomLevel() {
     }
 }
 
+/*
+    Loads string metadata from the FILE rdb, 
+    and moves the file pointer to the end of the string.
+    
+    - len will contain the length of the string
+    - memory will contain the memory this string would consume if loaded in memory
+    - savingsIfCompressed will contain the savings 
+        if this string were compressed on client side
+        before being saved in redis
+    - loadHeader if 1, then a 10 byte header will be loaded
+    - header - a 10 byte header, if loadHeader = 1
+*/
+int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength, 
+                    uint64_t *outMemory, uint64_t *outSavingsIfCompressed, 
+                    int inLoadHeader, unsigned char *outHeader) {
+
+    int isencoded;
+    uint64_t memory, len, clen = 0;
+    unsigned char buf[11];
+
+    len = rdbLoadLen(rdb,&isencoded);
+    if (isencoded) {
+        if (len == RDB_ENC_INT8) {
+            rdbSkip(rdb, 1);
+            len = 0;
+            memory = 0;
+        }
+        else if (len == RDB_ENC_INT16) {
+            rdbSkip(rdb, 2);
+            len = 0;
+            memory = 8;
+        }
+        else if (len == RDB_ENC_INT32) {
+            rdbSkip(rdb, 4);
+            len = 0;
+            memory = 8;
+        }
+        else if (len == RDB_ENC_LZF) {
+            if ((clen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+            if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+            memory = len + 1 + 16 + 1;
+
+            if (inLoadHeader > 0) {
+                fread(buf, 11, 1, rdb);
+                if (buf[0] < (1 << 5) && buf[0] > 10) {
+                    for (int i=0; i<10; i++) {
+                        outHeader[i] = buf[i+1];
+                    }
+                    rdbSkip(rdb, clen - 11);
+                }
+                else {
+                    /* 
+                    Pay the cost of uncompressing the entire string 
+                    We can optimize this branch later.
+                    We have already read 11 bytes from rdb, so compensate accordingly
+                    */
+                    unsigned char *compressed = zmalloc(clen);
+                    unsigned char *uncompressed = zmalloc(len);
+                    for (int i=0; i<11; i++) {
+                        compressed[i] = buf[i];
+                    }
+                    fread(compressed + 11, clen - 11, 1, rdb);
+                    lzf_decompress(compressed,clen,uncompressed,len);
+
+                    for (int i=0; i<10; i++) {
+                        outHeader[i] = uncompressed[i];
+                    }
+                    zfree(compressed);
+                    zfree(uncompressed);
+
+                    rdbSkip(rdb, clen);
+                }
+            }
+            else {
+                rdbSkip(rdb, clen);
+            }
+        }
+        else {
+            rdbExitReportCorruptRDB("Unknown RDB string encoding type %d",len);
+        }
+    }
+    else {
+        if (inLoadHeader > 0) {
+            fread(outHeader, 10, 1, rdb);
+            rdbSkip(rdb, len - 10);
+        }
+        else {
+            rdbSkip(rdb, len);
+        }
+        memory = len + 1 + 16 + 1;
+    }
+
+    *outLength = len;
+    *outMemory = memory;
+    if (clen > 0) {
+        *outSavingsIfCompressed = len - clen;
+    }
+    else {
+        *outSavingsIfCompressed = 0;
+    }
+
+    return 0;
+}
+
 uint64_t rdbMemoryForString(FILE *rdb) {
     int isencoded;
     uint64_t len, clen;
@@ -487,16 +591,15 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
-    char **dataType, **encoding;
+    char *dataType;
+    char *encoding;
+    unsigned char header[11];
     long long expiretime;
     uint64_t memory;
 
     if (fread(buf,9, 1, rdb) == 0) goto eoferr;
     buf[9] = '\0';
     rdbver = atoi(buf+5);
-
-    dataType = zmalloc(20);
-    encoding = zmalloc(20);
 
     while(1) {
         expiretime = -1;
@@ -556,12 +659,11 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
         /* Read key */
         sds key = rdbLoadString(rdb, NULL);
         memory = rdbMemoryForObject(type,rdb);
-        getDataTypeAndEncoding(type, dataType, encoding);
-        fprintf(csv, "%llu,%s,%s,%llu,%s\n", dbid, *dataType, key, memory, *encoding);
+        getDataTypeAndEncoding(type, &dataType, &encoding);
+        fprintf(csv, "%llu,%s,%s,%llu,%s\n", dbid, dataType, key, memory, encoding);
         sdsfree(key);
     }
-    zfree(dataType);
-    zfree(encoding);
+    
     return 0;
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */

@@ -111,6 +111,70 @@
 #define SKIPLIST_ENTRY_OVERHEAD (HASHTABLE_ENTRY_OVERHEAD + 2*SIZEOF_LONG + 8 + (SIZEOF_POINTER + 8) * zsetRandomLevel())
 
 
+typedef struct MemoryEntry {
+    /*
+        Logical datatype, one of string, hash, set, list, sortedset
+    */
+    int logicalType;
+    
+    /*
+        The internal encoding redis uses to represent this logical data type
+    */
+    int encoding;
+
+    /*
+        Memory used in bytes
+    */
+    uint64_t bytes;
+    
+    /*
+        For string, this is the length of the string
+        For hash, set, list, sortedset, this is the number of elements
+    */
+    uint64_t length;
+    /*
+        For string, this is equal to the length of the string
+        For hash, it is the length of the largest key or value in the hash
+        For set, it is the length of the largest member in the set
+        For list, it is the length of the largest element in the list
+        For zset, it is the length of the largest member in the set
+    */
+    uint64_t lenLargestElement;
+
+    /*
+        This is a rough indicator of how much memory would be saved 
+        if client side compression was used before saving values in redis.
+        The actual compression algorithm is LZF.    
+
+        For strings, this directly maps to the bytes saved if the value is compressed
+        For hashes, we ignore field names, 
+            and sum the memory saved if each value would be compressed.
+
+        For sets, we sum the memory saved if each member were to be compressed
+        For sortedsets, we sum the memory saved if each member were to be compressed
+        Fr lists, we sum the memory saved if each element were to be compressed.
+    */
+    uint64_t savingsIfCompressed;
+
+    /*
+        This is the relative expiry expressed in milliseconds
+        The RDB file has the expiry in absolute timestamp. 
+        We convert it into a relative timestamp by using 
+        the RDB snapshot creation time as the reference timestamp.
+
+        RDB versions >=8 have the snapshot time stored as an auxiliary field.
+        However, older versions do not have aux fields, so we have to 
+        figure out the snapshot time using some heuristics.
+
+        1. Accept optional input parameter
+        1. Use the file creation timestamp
+        1. Use the earliest timestamp found in the RDB. 
+            It is guaranteed that the snapshot was created before this timestamp,
+            so use it in the worst case
+    */
+    uint64_t expiry;
+} MemoryEntry;
+
 int rdbLoadType(FILE *rdb);
 time_t rdbLoadTime(FILE *rdb);
 uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
