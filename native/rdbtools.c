@@ -342,24 +342,13 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
             if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
             memory = len + 1 + 16 + 1;
 
-            if (clen < 11) {
-                printf("ERROR\n");
-                printf("ERROR\n");
-                printf("Did not expect clen to be less that 11\n");
-                printf("ERROR\n");
-
-            }
             if (outHeader) {
                 fread(buf, 11, 1, rdb);
                 if (buf[0] < (1 << 5) && buf[0] > 10) {
-                    printf("LZF, literal copy\n");
-                    for (int i=0; i<10; i++) {
-                        outHeader[i] = buf[i+1];
-                    }
+                    memcpy(outHeader, buf+1, 10);
                     rdbSkip(rdb, clen - 11);
                 }
                 else {
-                    printf("LZF, full decompress\n");
                     /* 
                     Pay the cost of uncompressing the entire string 
                     We can optimize this branch later.
@@ -372,13 +361,9 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
                     }
                     fread(compressed + 11, clen - 11, 1, rdb);
                     lzf_decompress(compressed,clen,uncompressed,len);
-                    printf("Uncompressed successfully");
-                    for (int i=0; i<10; i++) {
-                        outHeader[i] = uncompressed[i];
-                    }
+                    memcpy(outHeader, uncompressed, 10);
                     zfree(compressed);
                     zfree(uncompressed);
-                    printf("Finished freeing compressed and uncompressed");
                 }
             }
             else {
@@ -391,7 +376,6 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
     }
     else {
         if (outHeader) {
-            printf("uncompressed string, simple fread\n");
             fread(outHeader, 10, 1, rdb);
             rdbSkip(rdb, len - 10);
         }
@@ -401,7 +385,6 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
         memory = len + 1 + 16 + 1;
     }
 
-    printf("Trying to write out parameters\n");
     *outLength = len;
     *outMemory = memory;
     if (clen > 0) {
@@ -410,11 +393,6 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
     else {
         *outSavingsIfCompressed = 0;
     }
-    if (outHeader) {
-        printf("outHeader = %d", outHeader[4]);
-    }
-    printf("Done writing out parameters\n");
-
     return 0;
 }
 
@@ -492,8 +470,6 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
         we load the first 10 bytes of the header
     */
     uint16_t zipListHeader[5];
-
-    printf("%d", rdbtype);
 
     if (rdbtype == RDB_TYPE_STRING) {
         rdbLoadStringMetadata(rdb, &len, &memory, &savingsIfCompressed, NULL);
@@ -591,7 +567,6 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
         uint64_t numOfZiplists = 0;
         if ((numOfZiplists = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-        printf("numOfZiplists = %llu\n", numOfZiplists);
         memory += QUICKLIST_OVERHEAD;
         memory += QUICKLIST_ITEM_OVERHEAD * numOfZiplists;
         
@@ -600,7 +575,6 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
 
         while (numOfZiplists--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, zipListHeader);
-            printf("rdbLoadStringMetadata completed successfully");
             memory += eMemory;
             savingsIfCompressed += eSavingsIfCompressed;
 
@@ -609,9 +583,7 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
                 the 5th element represents the number of elements
                 in the ziplist
             */
-            printf("Tring to read length of zipListHeader");
             len += zipListHeader[4];
-            printf("Completed reading length of zipListHeader");
         }
     } else if (rdbtype == RDB_TYPE_HASH_ZIPMAP  ||
                rdbtype == RDB_TYPE_LIST_ZIPLIST ||
