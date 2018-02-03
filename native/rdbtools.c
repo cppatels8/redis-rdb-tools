@@ -310,12 +310,11 @@ int zsetRandomLevel() {
     - savingsIfCompressed will contain the savings 
         if this string were compressed on client side
         before being saved in redis
-    - loadHeader if 1, then a 10 byte header will be loaded
-    - header - a 10 byte header, if loadHeader = 1
+    - header - a 10 byte header, loaded as 5 uint16_t 
 */
 int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength, 
                     uint64_t *outMemory, uint64_t *outSavingsIfCompressed, 
-                    int inLoadHeader, unsigned char *outHeader) {
+                    uint16_t *outHeader) {
 
     int isencoded;
     uint64_t memory, len, clen = 0;
@@ -343,15 +342,24 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
             if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
             memory = len + 1 + 16 + 1;
 
-            if (inLoadHeader > 0) {
+            if (clen < 11) {
+                printf("ERROR\n");
+                printf("ERROR\n");
+                printf("Did not expect clen to be less that 11\n");
+                printf("ERROR\n");
+
+            }
+            if (outHeader) {
                 fread(buf, 11, 1, rdb);
                 if (buf[0] < (1 << 5) && buf[0] > 10) {
+                    printf("LZF, literal copy\n");
                     for (int i=0; i<10; i++) {
                         outHeader[i] = buf[i+1];
                     }
                     rdbSkip(rdb, clen - 11);
                 }
                 else {
+                    printf("LZF, full decompress\n");
                     /* 
                     Pay the cost of uncompressing the entire string 
                     We can optimize this branch later.
@@ -364,14 +372,13 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
                     }
                     fread(compressed + 11, clen - 11, 1, rdb);
                     lzf_decompress(compressed,clen,uncompressed,len);
-
+                    printf("Uncompressed successfully");
                     for (int i=0; i<10; i++) {
                         outHeader[i] = uncompressed[i];
                     }
                     zfree(compressed);
                     zfree(uncompressed);
-
-                    rdbSkip(rdb, clen);
+                    printf("Finished freeing compressed and uncompressed");
                 }
             }
             else {
@@ -383,7 +390,8 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
         }
     }
     else {
-        if (inLoadHeader > 0) {
+        if (outHeader) {
+            printf("uncompressed string, simple fread\n");
             fread(outHeader, 10, 1, rdb);
             rdbSkip(rdb, len - 10);
         }
@@ -393,6 +401,7 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
         memory = len + 1 + 16 + 1;
     }
 
+    printf("Trying to write out parameters\n");
     *outLength = len;
     *outMemory = memory;
     if (clen > 0) {
@@ -401,6 +410,10 @@ int rdbLoadStringMetadata(FILE *rdb, uint64_t *outLength,
     else {
         *outSavingsIfCompressed = 0;
     }
+    if (outHeader) {
+        printf("outHeader = %d", outHeader[4]);
+    }
+    printf("Done writing out parameters\n");
 
     return 0;
 }
@@ -453,13 +466,37 @@ uint64_t topLevelObjectOverhead(uint64_t memoryForKey, int hasExpiry) {
 /* Load a Redis object of the specified type from the specified file.
  * On success a newly allocated object is returned, otherwise NULL. */
 uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
-    uint64_t len;
-    unsigned int i;
-    uint64_t memory = 0;
-    double score;
+    
+    /*
+        len is the number of elements/key=value pairs in the data structure. 
+            For strings, it is the length of the string.
+        memory is the memory used by this obect in bytes
+        savingsIfCompressed is potential memory saved 
+            if this object was compressed before storing in redis
+        maxLengthOfElement is the length of the largest element/field/value
+             in this object. For string, it is length of string.
+
+    */    
+    uint64_t len = 0, memory = 0, savingsIfCompressed = 0;
+    uint64_t maxLengthOfElement = -1;
+
+    /* 
+        e stands for "element"
+        These variables are similar to the ones above, 
+        except they are for elements within this object
+    */
+    uint64_t eLen, eMemory, eSavingsIfCompressed;
+    
+    /*
+        For ziplist, to find out the number of elements
+        we load the first 10 bytes of the header
+    */
+    uint16_t zipListHeader[5];
+
+    printf("%d", rdbtype);
 
     if (rdbtype == RDB_TYPE_STRING) {
-        memory = rdbMemoryForString(rdb);
+        rdbLoadStringMetadata(rdb, &len, &memory, &savingsIfCompressed, NULL);
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -469,24 +506,34 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
 
         /* skip every single element of the list */
         while(len--) {
-            memory += rdbMemoryForString(rdb);
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > maxLengthOfElement) {
+                maxLengthOfElement = eLen;
+            }
         }
 
     } else if (rdbtype == RDB_TYPE_SET) {
-        /* Read Set value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
         memory += HASHTABLE_OVERHEAD(len);
         memory += HASHTABLE_ENTRY_OVERHEAD * len;
 
+        unsigned int i;
         /* Load every single element of the set */
         for (i = 0; i < len; i++) {
-            memory += rdbMemoryForString(rdb);
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > maxLengthOfElement) {
+                maxLengthOfElement = eLen;
+            }
         }
     } else if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET) {
-        /* Read list/set value. */
         uint64_t zsetlen;
-        
+        double score;
+
         if ((zsetlen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
         
         memory += SKIPLIST_OVERHEAD(zsetlen);
@@ -499,7 +546,12 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
 
         /* Load every single element of the sorted set. */
         while(zsetlen--) {
-            memory += rdbMemoryForString(rdb);
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > maxLengthOfElement) {
+                maxLengthOfElement = eLen;
+            }
 
             if (rdbtype == RDB_TYPE_ZSET_2) {
                 rdbSkip(rdb,sizeof(double));
@@ -520,16 +572,46 @@ uint64_t rdbMemoryForObject(int rdbtype, FILE *rdb) {
         
         while (len > 0) {
             len--;
-            memory += rdbMemoryForString(rdb);
-            memory += rdbMemoryForString(rdb);
+            /* Read Field Name */
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > maxLengthOfElement) {
+                maxLengthOfElement = eLen;
+            }
+            
+            /* Read Value */
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > maxLengthOfElement) {
+                maxLengthOfElement = eLen;
+            }
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
-        if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+        uint64_t numOfZiplists = 0;
+        if ((numOfZiplists = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
+        printf("numOfZiplists = %llu\n", numOfZiplists);
         memory += QUICKLIST_OVERHEAD;
-        memory += QUICKLIST_ITEM_OVERHEAD * len;
+        memory += QUICKLIST_ITEM_OVERHEAD * numOfZiplists;
+        
+        /* Don't compute maxLengthOfElement, use the default*/
+        maxLengthOfElement = 512;
 
-        while (len--) {
-            memory += rdbMemoryForString(rdb);
+        while (numOfZiplists--) {
+            rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, zipListHeader);
+            printf("rdbLoadStringMetadata completed successfully");
+            memory += eMemory;
+            savingsIfCompressed += eSavingsIfCompressed;
+
+            /*
+             ziplist header, if treated as uint16_t, 
+                the 5th element represents the number of elements
+                in the ziplist
+            */
+            printf("Tring to read length of zipListHeader");
+            len += zipListHeader[4];
+            printf("Completed reading length of zipListHeader");
         }
     } else if (rdbtype == RDB_TYPE_HASH_ZIPMAP  ||
                rdbtype == RDB_TYPE_LIST_ZIPLIST ||
