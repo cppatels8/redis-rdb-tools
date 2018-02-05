@@ -184,6 +184,6 @@ int rdbMemoryAnalysis(char *rdb, char *csv);
 sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed);
 int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
 int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
-int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv);
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime);
 
 #endif
