@@ -216,7 +216,7 @@ err:
  * Also calculates memory in bytes, 
  * and savings if the string were to be stored compressed 
  */
-sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
+void * rdbLoadStringInternal(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed, int plain) {
     int isencoded;
     uint64_t len;
     
@@ -238,10 +238,12 @@ sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
         }
     }
 
-    void *buf = sdsnewlen(NULL,len);
-    
+    void *buf = plain ? zmalloc(len) : sdsnewlen(NULL,len);
     if (len && fread(buf,len, 1, rdb) == 0) {
-        sdsfree(buf);
+        if (plain)
+            zfree(buf);
+        else
+            sdsfree(buf);
         return NULL;
     }
     /*
@@ -249,6 +251,16 @@ sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
     */
     *memory = len + 1 + 16 + 1;
     return buf;
+}
+
+char * rdbLoadPlainString(FILE *rdb) {
+    uint64_t memory;
+    uint64_t savingsIfCompressed;
+    return rdbLoadStringInternal(rdb, &memory, &savingsIfCompressed, 1);
+}
+
+sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed) {
+    return rdbLoadStringInternal(rdb, memory, savingsIfCompressed, 0);
 }
 
 /* For information about double serialization check rdbSaveDoubleValue() */
@@ -552,7 +564,7 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb,
         *memory += HASHTABLE_OVERHEAD(numElements);
         *memory += HASHTABLE_ENTRY_OVERHEAD * numElements;
         *len = numElements;
-        
+
         while (numElements > 0) {
             numElements--;
             /* Read Field Name */
@@ -659,8 +671,8 @@ int getDataTypeAndEncoding(int type, char **logicalType, char **encoding) {
 
     return 0;
 }
-/* Load an RDB file 'rdb'. On success C_OK is returned,
- * otherwise C_ERR is returned and 'errno' is set accordingly. */
+/**
+*/
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
     uint64_t dbid;
     int type, rdbver;
@@ -669,6 +681,11 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
     char *encoding;
     unsigned char header[11];
     long long expiretime = 0;
+
+    /*
+    This is the time this snapshot was created
+    */
+    long long snapshotTime = 0;
     uint64_t memory = 0, savingsIfCompressed = 0;
     uint64_t len = 0, maxLengthOfElement = -1;
     uint64_t keyMemory = 0, valueMemory = 0;
@@ -711,8 +728,11 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
             rdbLoadLen(rdb,NULL);
             continue; /* Read type again. */
         } else if (type == RDB_OPCODE_AUX) {
-            rdbSkipStringObject(rdb);
-            rdbSkipStringObject(rdb);
+            char *key = rdbLoadPlainString(rdb);
+            char *value = rdbLoadPlainString(rdb);
+            if (!strcasecmp(key,"ctime")) {
+                snapshotTime = strtoll(value, NULL, 10);
+            }
             continue; /* Read type again. */
         }
 
@@ -722,16 +742,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv) {
         *       We want "expires in 4 hours" instead of "expires at such and such time"
         *       To do so, we need to store the snapshot time ("ctime" aux field),
         *       and then subtract this from the absolute expiry time in rdb
-        *
-        *   database number => trivial
-        *   data type => trivial
-        *   encoding => trivial
-        *   savingsIfCompressed => if compressed (length - compressed length) else 0
-        *   length => simple for objects, more complex for embedded objects
-        *   length_of_largest_element => very involved for embedded objects...
-        *       ... but it is useless for embedded objects anyways, so we can skip.
-        *   
-        */
+        *        */
         /* Read key */
         sds key = rdbLoadString(rdb, &keyMemory, &savingsIfCompressed);
         rdbMemoryForObject(type,rdb, &len, &valueMemory, 
