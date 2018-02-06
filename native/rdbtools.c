@@ -698,6 +698,9 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
     buf[9] = '\0';
     rdbver = atoi(buf+5);
 
+    /* Print CSV Header */
+    fprintf(csv, "\"database\",\"type\",\"key\",\"size_in_bytes\",\"encoding\",\"num_elements\",\"len_largest_element\",\"expiry\",\"savings_if_compressed\"\n");
+
     while(1) {
         expiretime = -1;
 
@@ -751,6 +754,11 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         *        */
         /* Read key */
         sds key = rdbLoadString(rdb, &keyMemory, &savingsIfCompressed);
+
+        /* TODO: sdscatrepr is a very slow function call. 
+            Replace with a more optimal version
+        */
+        key = sdscatrepr(sdsempty(), key, sdslen(key));
         rdbMemoryForObject(type,rdb, &len, &valueMemory, 
                         &savingsIfCompressed, &maxLengthOfElement);
         getDataTypeAndEncoding(type, &dataType, &encoding);
@@ -760,7 +768,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         if (expiretime != -1) {
             expiretime = expiretime - snapshotTime;
         }
-        fprintf(csv, "%llu,%s,%s,%llu,%s,%llu,%llu,%lld,%llu\n", dbid, dataType, key, 
+        fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
             memory, encoding, len, maxLengthOfElement, expiretime, savingsIfCompressed);
         sdsfree(key);
     }
