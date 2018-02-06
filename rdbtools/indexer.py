@@ -10,6 +10,7 @@ import bisect
 from collections import namedtuple
 from iowrapper import IOWrapper
 from distutils.version import StrictVersion
+import mmap
 
 try:
     try:
@@ -75,6 +76,45 @@ MemoryRecord = namedtuple('MemoryRecord', ['database', 'type', 'key', 'bytes', '
 ZSKIPLIST_MAXLEVEL=32
 ZSKIPLIST_P=0.25
 REDIS_SHARED_INTEGERS = 10000
+
+def print_keys(rdb):
+    with rdb as f:
+        verify_magic_string(f.read(5))
+        rdb_version = get_rdb_version(f.read(4))
+        
+        while True:
+            data_type = read_unsigned_char(f)
+
+            if data_type == REDIS_RDB_OPCODE_EXPIRETIME_MS:
+                skip_unsigned_long(f)
+                data_type = read_unsigned_char(f)
+            elif data_type == REDIS_RDB_OPCODE_EXPIRETIME:
+                skip_unsigned_int(f)
+                data_type = read_unsigned_char(f)
+
+            if data_type == REDIS_RDB_OPCODE_SELECTDB:
+                skip_length_field(f)
+                continue
+
+            if data_type == REDIS_RDB_OPCODE_AUX:
+                for _ in range(2):
+                    skip_string(f)
+                continue
+
+            if data_type == REDIS_RDB_OPCODE_RESIZEDB:
+                for _ in range(2):
+                    skip_length_field(f)
+                continue
+
+            if data_type == REDIS_RDB_OPCODE_EOF:
+                if rdb_version >= 5:
+                    skip_checksum(f)
+                break
+
+            key = read_string(f)
+            skip_object(f, data_type)
+            print("%s", key)
+
 
 class RedisMemoryAnalyzer(object):
     """
@@ -868,12 +908,55 @@ def get_rdb_version(version_str) :
     return version
 
 def skip(f, free):
-    if free :
-        f.seek(free, os.SEEK_CUR)
+    f.seek(free, os.SEEK_CUR)
 
 def skip_key_and_object(f, data_type):
     skip_string(f)
     skip_object(f, data_type)
+
+def skip_object(f, enc_type):
+    if enc_type == REDIS_RDB_TYPE_STRING:
+        return skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_LIST:
+        length = read_length(f)
+        for _ in range(length):
+            skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_LIST_ZIPLIST:
+        skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_LIST_QUICKLIST:
+        length = read_length(f)
+        for _ in range(length):
+            skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_SET:
+        length = read_length(f)
+        for _ in range(length):
+            skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_SET_INTSET:
+        skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_ZSET or enc_type == REDIS_RDB_TYPE_ZSET_2 :
+        length = read_length(f)
+        for _ in range(length):
+            skip_string(f)
+            if enc_type == REDIS_RDB_TYPE_ZSET:
+                read_float(f)
+            elif enc_type == REDIS_RDB_TYPE_ZSET_2:
+                skip_double(f)
+    elif enc_type == REDIS_RDB_TYPE_ZSET_ZIPLIST:
+        skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_HASH:
+        length = read_length(f)
+        for _ in range(length*2):
+            skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_HASH_ZIPMAP:
+        skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_HASH_ZIPLIST:
+        skip_string(f)
+    elif enc_type == REDIS_RDB_TYPE_MODULE:
+        raise Exception('read_object', 'Unable to read Redis Modules RDB objects (key %s)' % self._key)
+    elif enc_type == REDIS_RDB_TYPE_MODULE_2:
+        return self.read_module(f)
+    else:
+        raise Exception('read_object', 'Invalid object type %d for key %s' % (enc_type, self.current_key))
 
 def skip_string(f):
     tup = read_length_with_encoding(f)
@@ -1102,12 +1185,17 @@ def test_dumps():
                 if record and record.encoding in ('quicklist'):
                     print(record)
 
+# if __name__ == '__main__':
+#     with open(sys.argv[1], "rb") as f:
+#         records = RedisMemoryAnalyzer().get_memory_records(f)
+
+#         with open(sys.argv[2], "w") as f:
+#             writer = csv.writer(f, delimiter=',', quotechar='"')
+#             for record in records:
+#                 writer.writerow(record)
+
+
 if __name__ == '__main__':
     with open(sys.argv[1], "rb") as f:
-        records = RedisMemoryAnalyzer().get_memory_records(f)
-
-        with open(sys.argv[2], "w") as f:
-            writer = csv.writer(f, delimiter=',', quotechar='"')
-            for record in records:
-                writer.writerow(record)
-
+        mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+        print_keys(mm)
