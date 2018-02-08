@@ -468,15 +468,9 @@ uint64_t topLevelObjectOverhead(uint64_t memoryForKey, int hasExpiry) {
     maxLengthOfElement is the length of the largest element/field/value
          in this object. For string, it is length of string.
 */
-int rdbMemoryForObject(int rdbtype, FILE *rdb,
-    uint64_t *len, uint64_t *memory, uint64_t *savingsIfCompressed, 
-    uint64_t *maxLengthOfElement) {
-    
-    *len = 0;
-    *memory = 0;
-    *savingsIfCompressed = 0;
-    *maxLengthOfElement = 0;
+int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
 
+    me->bytes = me->lenLargestElement = me->savingsIfCompressed = me->length = 0;
     /* 
         e stands for "element"
         These variables are similar to the ones above, 
@@ -492,62 +486,62 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb,
     uint16_t zipListHeader[5];
 
     if (rdbtype == RDB_TYPE_STRING) {
-        rdbLoadStringMetadata(rdb, len, memory, savingsIfCompressed, NULL);
+        rdbLoadStringMetadata(rdb, &me->length, &me->bytes, &me->savingsIfCompressed, NULL);
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
-        *len = numElements;
-        memory += LINKEDLIST_OVERHEAD;
-        memory += LINKEDLIST_ITEM_OVERHEAD * numElements;
+        me->length = numElements;
+        me->bytes += LINKEDLIST_OVERHEAD;
+        me->bytes += LINKEDLIST_ITEM_OVERHEAD * numElements;
 
         /* skip every single element of the list */
         while(numElements--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
-            if (eLen > *maxLengthOfElement) {
-                *maxLengthOfElement = eLen;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > me->lenLargestElement) {
+                me->lenLargestElement = eLen;
             }
         }
 
     } else if (rdbtype == RDB_TYPE_SET) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
 
-        *len = numElements;
-        *memory += HASHTABLE_OVERHEAD(numElements);
-        *memory += HASHTABLE_ENTRY_OVERHEAD * numElements;
+        me->length = numElements;
+        me->bytes += HASHTABLE_OVERHEAD(numElements);
+        me->bytes += HASHTABLE_ENTRY_OVERHEAD * numElements;
 
         unsigned int i;
         /* Load every single element of the set */
         for (i = 0; i < numElements; i++) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
-            if (eLen > *maxLengthOfElement) {
-                *maxLengthOfElement = eLen;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > me->lenLargestElement) {
+                me->lenLargestElement = eLen;
             }
         }
     } else if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET) {
         double score;
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-        *len = numElements;
+        me->length = numElements;
 
-        *memory += SKIPLIST_OVERHEAD(numElements);
+        me->bytes += SKIPLIST_OVERHEAD(numElements);
         if (rdbtype == RDB_TYPE_ZSET) {
-            *memory += (SKIPLIST_ENTRY_OVERHEAD+4) * numElements;
+            me->bytes += (SKIPLIST_ENTRY_OVERHEAD+4) * numElements;
         }
         else if (rdbtype == RDB_TYPE_ZSET_2) {
-            *memory += (SKIPLIST_ENTRY_OVERHEAD+8) * numElements;
+            me->bytes += (SKIPLIST_ENTRY_OVERHEAD+8) * numElements;
         }
 
         /* Load every single element of the sorted set. */
         while(numElements--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
-            if (eLen > *maxLengthOfElement) {
-                *maxLengthOfElement = eLen;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > me->lenLargestElement) {
+                me->lenLargestElement = eLen;
             }
 
             if (rdbtype == RDB_TYPE_ZSET_2) {
@@ -562,47 +556,47 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb,
         }
     } else if (rdbtype == RDB_TYPE_HASH) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-        *memory += HASHTABLE_OVERHEAD(numElements);
-        *memory += HASHTABLE_ENTRY_OVERHEAD * numElements;
-        *len = numElements;
+        me->bytes += HASHTABLE_OVERHEAD(numElements);
+        me->bytes += HASHTABLE_ENTRY_OVERHEAD * numElements;
+        me->length = numElements;
 
         while (numElements > 0) {
             numElements--;
             /* Read Field Name */
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
-            if (eLen > *maxLengthOfElement) {
-                *maxLengthOfElement = eLen;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > me->lenLargestElement) {
+                me->lenLargestElement = eLen;
             }
             
             /* Read Value */
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
-            if (eLen > *maxLengthOfElement) {
-                *maxLengthOfElement = eLen;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
+            if (eLen > me->lenLargestElement) {
+                me->lenLargestElement = eLen;
             }
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
-        *memory += QUICKLIST_OVERHEAD;
-        *memory += QUICKLIST_ITEM_OVERHEAD * numElements;
+        me->bytes += QUICKLIST_OVERHEAD;
+        me->bytes += QUICKLIST_ITEM_OVERHEAD * numElements;
         
         /* Don't compute maxLengthOfElement, use the default*/
-        *maxLengthOfElement = 512;
+        me->lenLargestElement = 512;
 
         while (numElements--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, zipListHeader);
-            *memory += eMemory;
-            *savingsIfCompressed += eSavingsIfCompressed;
+            me->bytes += eMemory;
+            me->savingsIfCompressed += eSavingsIfCompressed;
 
             /*
              ziplist header, if treated as uint16_t, 
                 the 5th element represents the number of elements
                 in the ziplist
             */
-            *len += zipListHeader[4];
+            me->length += zipListHeader[4];
         }
     } else if (rdbtype == RDB_TYPE_HASH_ZIPMAP  ||
                rdbtype == RDB_TYPE_LIST_ZIPLIST ||
@@ -610,78 +604,28 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb,
                rdbtype == RDB_TYPE_ZSET_ZIPLIST ||
                rdbtype == RDB_TYPE_HASH_ZIPLIST)
     {
-        *memory = rdbMemoryForString(rdb);
+        me->bytes = rdbMemoryForString(rdb);
     } else {
         rdbExitReportCorruptRDB("Unknown RDB encoding type %d",rdbtype);
     }
     return 0;
 }
 
-int getDataTypeAndEncoding(int type, char **logicalType, char **encoding) {
-    if (type == RDB_TYPE_STRING) {
-        *logicalType = "string";
-        *encoding = "string";
-    }
-    else if (type == RDB_TYPE_LIST) {
-        *logicalType = "list";
-        *encoding = "linkedlist";
-    } 
-    else if (type == RDB_TYPE_LIST_ZIPLIST) {
-        *logicalType = "list";
-        *encoding = "ziplist";
-    }
-    else if (type == RDB_TYPE_LIST_QUICKLIST) {
-        *logicalType = "list";
-        *encoding = "quicklist";
-    }
-    else if (type == RDB_TYPE_SET) {
-        *logicalType = "set";
-        *encoding = "hashtable";
-    }
-    else if (type == RDB_TYPE_SET_INTSET) {
-        *logicalType = "set";
-        *encoding = "intset";
-    }
-    else if (type == RDB_TYPE_ZSET_2) {
-        *logicalType = "zset";
-        *encoding = "skiplist";
-    }
-    else if (type == RDB_TYPE_ZSET) {
-        *logicalType = "zset";
-        *encoding = "skiplist";
-    }
-    else if (type == RDB_TYPE_ZSET_ZIPLIST) {
-        *logicalType = "zset";
-        *encoding = "ziplist";
-    }
-    else if (type == RDB_TYPE_HASH) {
-        *logicalType = "hash";
-        *encoding = "hashtable";
-    }
-    else if (type == RDB_TYPE_HASH_ZIPLIST) {
-        *logicalType = "hash";
-        *encoding = "ziplist";
-    }
-    else if (type == RDB_TYPE_HASH_ZIPMAP) {
-        *logicalType = "hash";
-        *encoding = "zipmap";
-    }
-    else {
-        return -1;
-    }
-
+int getDataTypeAndEncoding(int type, const char **logicalType, const char **encoding) {
+    *logicalType = DATATYPES[type];
+    *encoding = ENCODINGS[type];
     return 0;
 }
-/**
-*/
+
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
-    char *dataType;
-    char *encoding;
+    const char *dataType;
+    const char *encoding;
     unsigned char header[11];
     int64_t expiretime = -1;
+    MemoryEntry me;
 
     /*
         This is the time this snapshot was created.
@@ -759,17 +703,16 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
             Replace with a more optimal version
         */
         key = sdscatrepr(sdsempty(), key, sdslen(key));
-        rdbMemoryForObject(type,rdb, &len, &valueMemory, 
-                        &savingsIfCompressed, &maxLengthOfElement);
+        rdbMemoryForObject(type, rdb, &me);
         getDataTypeAndEncoding(type, &dataType, &encoding);
         
-        memory = keyMemory + valueMemory;
+        memory = keyMemory + me.bytes;
 
         if (expiretime != -1) {
             expiretime = expiretime - snapshotTime;
         }
         fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
-            memory, encoding, len, maxLengthOfElement, expiretime, savingsIfCompressed);
+            me.bytes, encoding, me.length, me.lenLargestElement, expiretime, me.savingsIfCompressed);
         sdsfree(key);
     }
     

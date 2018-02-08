@@ -61,6 +61,15 @@
 #define RDB_TYPE_STREAM_LISTPACKS 15
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 
+#define NUMBER_OF_ENCODINGS 16
+const char *DATATYPES[NUMBER_OF_ENCODINGS] = {"string", "list", "set", "zset", "hash", "zset", "module", "module",
+                            NULL, 
+                            "hash", "list", "set", "zset", "hash", "list", "stream"};
+
+const char *ENCODINGS[NUMBER_OF_ENCODINGS] = {"string", "linkedlist", "hashtable", "skiplist", "hashtable", "skiplist", "type1", "type2",
+                            NULL, 
+                            "zipmap", "ziplist", "intset", "ziplist", "ziplist", "quicklist", "listpack"};
+
 /* Test if a type is an object type. */
 #define rdbIsObjectType(t) ((t >= 0 && t <= 7) || (t >= 9 && t <= 15))
 
