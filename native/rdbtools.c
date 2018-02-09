@@ -623,12 +623,37 @@ void initStats(Statistics *stats) {
         stats->memoryByEncoding[i] = stats->countKeysByEncoding[i] = 0;
     }
 }
+
+void addTopKeys(Statistics *stats, MemoryEntry *me) {
+	int noe, currentCount=stats->totalKeys-1;
+	noe = currentCount >= TOP_KEYS_COUNT ? TOP_KEYS_COUNT-1: currentCount;
+
+	if(noe==TOP_KEYS_COUNT && stats->topMemoryKeys[noe-1].bytes >= me->bytes) {
+		return;
+	}
+
+	if(noe == TOP_KEYS_COUNT) {
+		while(noe!=0 && stats->topMemoryKeys[noe].bytes < me->bytes && stats->topMemoryKeys[noe-1].bytes < me->bytes) {
+			stats->topMemoryKeys[noe] = stats->topMemoryKeys[noe-1];
+			noe--;
+		}
+	} else {
+		while(noe!=0 && stats->topMemoryKeys[noe-1].bytes < me->bytes) {
+			stats->topMemoryKeys[noe] = stats->topMemoryKeys[noe-1];
+			noe--;
+		}
+	}
+	stats->topMemoryKeys[noe] = *me;
+}
+
 void updateStats(MemoryEntry *me, Statistics *stats) {
     stats->totalMemory += me->bytes;
     stats->totalKeys++;
 
     stats->memoryByEncoding[me->dataType] += me->bytes;
     stats->countKeysByEncoding[me->dataType]++;
+
+    addTopKeys(stats, me);
 }
 
 void printStats(Statistics *stats) {
@@ -642,6 +667,9 @@ void printStats(Statistics *stats) {
         printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
     }
 
+    for(int i=0; i< TOP_KEYS_COUNT; i++){
+    	printf("Max Final memory %d==%llu\n", i, stats->topMemoryKeys[i].bytes);
+    }
 }
 
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime) {
@@ -783,5 +811,5 @@ int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
 }
 
 int main(int argc, char **argv) {
-    return rdbMemoryAnalysis("askubuntu.rdb", "askubuntu_memory.csv");
+    return rdbMemoryAnalysis(argv[1], argv[2]);
 }

@@ -118,15 +118,7 @@ const char *ENCODINGS[NUMBER_OF_ENCODINGS] = {"string", "linkedlist", "hashtable
 #define ZSKIPLIST_P 0.25
 #define SKIPLIST_OVERHEAD(size) (2*SIZEOF_POINTER + HASHTABLE_OVERHEAD(size) + (2*SIZEOF_POINTER + 16))
 #define SKIPLIST_ENTRY_OVERHEAD (HASHTABLE_ENTRY_OVERHEAD + 2*SIZEOF_LONG + 8 + (SIZEOF_POINTER + 8) * zsetRandomLevel())
-
-typedef struct Statistics {
-    uint64_t totalMemory;
-    uint64_t totalKeys;
-
-    uint64_t memoryByEncoding[NUMBER_OF_ENCODINGS];
-    uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
-    
-} Statistics;
+#define TOP_KEYS_COUNT 10
 
 typedef struct MemoryEntry {
 
@@ -183,6 +175,17 @@ typedef struct MemoryEntry {
     */
     uint64_t expiry;
 } MemoryEntry;
+
+typedef struct Statistics {
+    uint64_t totalMemory;
+    uint64_t totalKeys;
+
+    uint64_t memoryByEncoding[NUMBER_OF_ENCODINGS];
+    uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
+
+    MemoryEntry topMemoryKeys[TOP_KEYS_COUNT];
+
+} Statistics;
 
 int rdbLoadType(FILE *rdb);
 time_t rdbLoadTime(FILE *rdb);
