@@ -617,6 +617,33 @@ int getDataTypeAndEncoding(int type, const char **logicalType, const char **enco
     return 0;
 }
 
+void initStats(Statistics *stats) {
+    stats->totalMemory = stats->totalKeys = 0;
+    for(int i=0; i<NUMBER_OF_ENCODINGS; i++) {
+        stats->memoryByEncoding[i] = stats->countKeysByEncoding[i] = 0;
+    }
+}
+void updateStats(MemoryEntry *me, Statistics *stats) {
+    stats->totalMemory += me->bytes;
+    stats->totalKeys++;
+
+    stats->memoryByEncoding[me->dataType] += me->bytes;
+    stats->countKeysByEncoding[me->dataType]++;
+}
+
+void printStats(Statistics *stats) {
+    printf("Total Memory = %llu\n", stats->totalMemory);
+    printf("Total Keys = %llu\n", stats->totalKeys);
+
+    for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
+        if (ENCODINGS[i] == NULL) continue;
+
+        printf("Memory for %s = %llu\n", ENCODINGS[i], stats->memoryByEncoding[i]);
+        printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
+    }
+
+}
+
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime) {
     uint64_t dbid;
     int type, rdbver;
@@ -626,6 +653,8 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
     unsigned char header[11];
     int64_t expiretime = -1;
     MemoryEntry me;
+    Statistics stats;
+    initStats(&stats);
 
     /*
         This is the time this snapshot was created.
@@ -634,7 +663,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         - Otherwise, we use the provided defaultSnapshotTime
     */
     uint64_t snapshotTime = defaultSnapshotTime * 1000;
-    uint64_t memory = 0, savingsIfCompressed = 0;
+    uint64_t savingsIfCompressed = 0;
     uint64_t len = 0, maxLengthOfElement = -1;
     uint64_t keyMemory = 0, valueMemory = 0;
     
@@ -702,20 +731,24 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         /* TODO: sdscatrepr is a very slow function call. 
             Replace with a more optimal version
         */
-        key = sdscatrepr(sdsempty(), key, sdslen(key));
+        //key = sdscatrepr(sdsempty(), key, sdslen(key));
         rdbMemoryForObject(type, rdb, &me);
         getDataTypeAndEncoding(type, &dataType, &encoding);
         
-        memory = keyMemory + me.bytes;
+        me.bytes = keyMemory + me.bytes;
 
         if (expiretime != -1) {
             expiretime = expiretime - snapshotTime;
         }
+        me.dataType = type;
+        updateStats(&me, &stats);
+        
         fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
             me.bytes, encoding, me.length, me.lenLargestElement, expiretime, me.savingsIfCompressed);
         sdsfree(key);
     }
     
+    printStats(&stats);
     return 0;
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */
