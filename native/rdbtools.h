@@ -192,10 +192,10 @@ time_t rdbLoadTime(FILE *rdb);
 uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
 int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr);
 int rdbLoadObjectType(FILE *rdb);
-int rdbMemoryAnalysis(char *rdb, char *csv);
+int rdbMemoryAnalysis(char *rdb, char *csv, char *jsonFile);
 sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed);
 int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
 int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
-int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime);
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defaultSnapshotTime);
 
 #endif

@@ -670,10 +670,14 @@ void updateStats(MemoryEntry *me, Statistics *stats) {
     addTopKeysByMemory(stats->topKeysByMemory, me, 0, TOP_KEYS_COUNT-1);
 }
 
-void printStats(Statistics *stats) {
+void printStats(Statistics *stats, FILE *jsonOut) {
+	fprintf (jsonOut, "{ \"data\" : {");
+	fprintf (jsonOut, " \"total_memory\" : %llu,", stats->totalMemory);
+	fprintf (jsonOut, " \"total_keys\" : %llu }", stats->totalKeys);
+	fprintf (jsonOut, " }\n");
+
     printf("Total Memory = %llu\n", stats->totalMemory);
     printf("Total Keys = %llu\n", stats->totalKeys);
-
     for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
         if (ENCODINGS[i] == NULL) continue;
 
@@ -686,7 +690,7 @@ void printStats(Statistics *stats) {
     }
 }
 
-int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime) {
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defaultSnapshotTime) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
@@ -790,7 +794,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         sdsfree(key);
     }
     
-    printStats(&stats);
+    printStats(&stats, jsonOut);
     return 0;
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */
@@ -799,14 +803,15 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return -1; /* Just to avoid warning */
 }
 
-int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
-    FILE *fp, *out;
+int rdbMemoryAnalysis(char *rdbFile, char *csvFile, char *jsonFile) {
+    FILE *fp, *out, *jsonOut;
     int retval;
     uint64_t defaultSnapshotTime;
     struct stat rdbStat;
 
     if ((fp = fopen(rdbFile,"rb")) == NULL) return -1;
     if ((out = fopen(csvFile,"w")) == NULL) return -1;
+    if ((jsonOut = fopen(jsonFile,"w")) == NULL) return -1;
     
     /*
         Read file last modified timestamp as a simple heuristic for 
@@ -818,12 +823,13 @@ int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
     fstat(fileno(fp), &rdbStat);
     defaultSnapshotTime = rdbStat.st_mtime;
     
-    retval = rdbMemoryAnalysisInternal(fp, out, defaultSnapshotTime);
+    retval = rdbMemoryAnalysisInternal(fp, out, jsonOut, defaultSnapshotTime);
     fclose(fp);
     fclose(out);
+    fclose(jsonOut);
     return retval;
 }
 
 int main(int argc, char **argv) {
-    return rdbMemoryAnalysis(argv[1], argv[2]);
+	return rdbMemoryAnalysis(argv[1], argv[2], argv[3]);
 }
