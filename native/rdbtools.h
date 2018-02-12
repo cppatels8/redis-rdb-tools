@@ -128,6 +128,8 @@ typedef struct MemoryEntry {
     */
     uint64_t bytes;
 
+    char *key;
+
     /*
         For string, this is the length of the string
         For hash, set, list, sortedset, this is the number of elements

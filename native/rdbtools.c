@@ -787,6 +787,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
             expiretime = expiretime - snapshotTime;
         }
         me.dataType = type;
+        me.key = key;
         updateStats(&me, &stats);
         
         fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
