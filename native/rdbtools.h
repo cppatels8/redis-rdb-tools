@@ -183,7 +183,7 @@ typedef struct Statistics {
     uint64_t memoryByEncoding[NUMBER_OF_ENCODINGS];
     uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
 
-    MemoryEntry topMemoryKeys[TOP_KEYS_COUNT];
+    MemoryEntry topKeysByMemory[TOP_KEYS_COUNT];
 
 } Statistics;
 

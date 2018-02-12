@@ -622,28 +622,42 @@ void initStats(Statistics *stats) {
     for(int i=0; i<NUMBER_OF_ENCODINGS; i++) {
         stats->memoryByEncoding[i] = stats->countKeysByEncoding[i] = 0;
     }
+
+    for(int i=0; i < TOP_KEYS_COUNT; i++){
+		stats->topKeysByMemory[i].bytes = 0;
+	}
 }
 
-void addTopKeys(Statistics *stats, MemoryEntry *me) {
-	int noe, currentCount=stats->totalKeys-1;
-	noe = currentCount >= TOP_KEYS_COUNT ? TOP_KEYS_COUNT-1: currentCount;
 
-	if(noe==TOP_KEYS_COUNT && stats->topMemoryKeys[noe-1].bytes >= me->bytes) {
-		return;
-	}
+int findPositionOfRecord(MemoryEntry meArr[], MemoryEntry *me, int low, int high) {
+	if (meArr[high].bytes >= me->bytes)
+		return -1;
 
-	if(noe == TOP_KEYS_COUNT) {
-		while(noe!=0 && stats->topMemoryKeys[noe].bytes < me->bytes && stats->topMemoryKeys[noe-1].bytes < me->bytes) {
-			stats->topMemoryKeys[noe] = stats->topMemoryKeys[noe-1];
-			noe--;
+	while (low <= high) {
+		int mid = (low + high)/2;
+		if (meArr[mid].bytes == me->bytes) {
+			return mid;
 		}
-	} else {
-		while(noe!=0 && stats->topMemoryKeys[noe-1].bytes < me->bytes) {
-			stats->topMemoryKeys[noe] = stats->topMemoryKeys[noe-1];
-			noe--;
+
+		if(meArr[mid].bytes == 0 ) {
+			high=mid;
+		}
+
+		if (meArr[mid].bytes < me->bytes) {
+			high = mid-1;
+		} else {
+			low = mid+1;
 		}
 	}
-	stats->topMemoryKeys[noe] = *me;
+	return low;
+}
+
+void addTopKeysByMemory(MemoryEntry meArr[], MemoryEntry *me, int low, int high) {
+	int index = findPositionOfRecord(meArr, me, low, high);
+	if(index != -1) {
+		memmove(&(meArr[index+1]), &(meArr[index]), (TOP_KEYS_COUNT-index-1)*sizeof(MemoryEntry));
+		meArr[index] = *me;
+	}
 }
 
 void updateStats(MemoryEntry *me, Statistics *stats) {
@@ -653,7 +667,7 @@ void updateStats(MemoryEntry *me, Statistics *stats) {
     stats->memoryByEncoding[me->dataType] += me->bytes;
     stats->countKeysByEncoding[me->dataType]++;
 
-    addTopKeys(stats, me);
+    addTopKeysByMemory(stats->topKeysByMemory, me, 0, TOP_KEYS_COUNT-1);
 }
 
 void printStats(Statistics *stats) {
@@ -668,7 +682,7 @@ void printStats(Statistics *stats) {
     }
 
     for(int i=0; i< TOP_KEYS_COUNT; i++){
-    	printf("Max Final memory %d==%llu\n", i, stats->topMemoryKeys[i].bytes);
+    	printf("Max Final memory %d==%llu\n", i, stats->topKeysByMemory[i].bytes);
     }
 }
 
