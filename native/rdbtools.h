@@ -51,6 +51,10 @@
                                the generating module being loaded. */
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 
+/* NOTE: WHEN ADDING NEW NATIVE DATA TYPE, UPDATE BELOW */
+#define NUMBER_OF_NATIVE_DATATYPE 5
+const char *NATIVEDATATYPES[NUMBER_OF_NATIVE_DATATYPE] = {"string", "list", "set", "zset", "hash"};
+
 /* Object types for encoded objects. */
 #define RDB_TYPE_HASH_ZIPMAP    9
 #define RDB_TYPE_LIST_ZIPLIST  10
@@ -122,7 +126,8 @@ const char *ENCODINGS[NUMBER_OF_ENCODINGS] = {"string", "linkedlist", "hashtable
 
 typedef struct MemoryEntry {
 
-    int dataType;
+    int encdType;
+    const char* dataType;
     /*
         Memory used in bytes
     */
@@ -178,6 +183,11 @@ typedef struct MemoryEntry {
     uint64_t expiry;
 } MemoryEntry;
 
+typedef struct DataTypeSummary {
+	uint64_t totalMemory;
+	uint64_t totalKeys;
+} DataTypeSummary;
+
 typedef struct Statistics {
     uint64_t totalMemory;
     uint64_t totalKeys;
@@ -186,6 +196,7 @@ typedef struct Statistics {
     uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
 
     MemoryEntry topKeysByMemory[TOP_KEYS_COUNT];
+    DataTypeSummary dataTypeSummary[NUMBER_OF_NATIVE_DATATYPE];
 
 } Statistics;
 

@@ -623,6 +623,10 @@ void initStats(Statistics *stats) {
         stats->memoryByEncoding[i] = stats->countKeysByEncoding[i] = 0;
     }
 
+    for(int i=0; i < NUMBER_OF_NATIVE_DATATYPE; i++){
+		stats->dataTypeSummary[i].totalMemory = stats->dataTypeSummary[i].totalKeys = 0;
+	}
+
     for(int i=0; i < TOP_KEYS_COUNT; i++){
 		stats->topKeysByMemory[i].bytes = 0;
 	}
@@ -661,33 +665,66 @@ void addTopKeysByMemory(MemoryEntry meArr[], MemoryEntry *me, int low, int high)
 }
 
 void updateStats(MemoryEntry *me, Statistics *stats) {
+	int index = -1;
     stats->totalMemory += me->bytes;
     stats->totalKeys++;
 
-    stats->memoryByEncoding[me->dataType] += me->bytes;
-    stats->countKeysByEncoding[me->dataType]++;
+    stats->memoryByEncoding[me->encdType] += me->bytes;
+    stats->countKeysByEncoding[me->encdType]++;
+
+    if (strncmp(me->dataType, NATIVEDATATYPES[0], strlen(NATIVEDATATYPES[0])) == 0) {
+    	index = 0;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[1], strlen(NATIVEDATATYPES[1])) == 0) {
+		index = 1;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[2], strlen(NATIVEDATATYPES[2])) == 0) {
+		index = 2;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[3], strlen(NATIVEDATATYPES[3])) == 0) {
+		index = 3;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[4], strlen(NATIVEDATATYPES[4])) == 0) {
+		index = 4;
+	}
+
+	if(index != -1) {
+		stats->dataTypeSummary[index].totalMemory += me->bytes;
+		stats->dataTypeSummary[index].totalKeys += 1;
+	}
 
     addTopKeysByMemory(stats->topKeysByMemory, me, 0, TOP_KEYS_COUNT-1);
 }
 
 void printStats(Statistics *stats, FILE *jsonOut) {
-	fprintf (jsonOut, "{ \"data\" : {");
-	fprintf (jsonOut, " \"total_memory\" : %llu,", stats->totalMemory);
-	fprintf (jsonOut, " \"total_keys\" : %llu }", stats->totalKeys);
+	fprintf (jsonOut, "{ \"summary\" : {");
+	fprintf (jsonOut, " \"totalSizeInBytes\" : %llu,", stats->totalMemory);
+	fprintf (jsonOut, " \"generatedTime\" : \"%s\",", "------");
+	fprintf (jsonOut, " \"numKeys\" : %llu,", stats->totalKeys);
+	fprintf (jsonOut, " \"dataTypeStats\" : {");
+
+	for(int i=0; i< NUMBER_OF_NATIVE_DATATYPE; i++){
+		fprintf (jsonOut, " \"%s\" : { \"count\": %llu, \"totalSizeInBytes\" : %llu }", NATIVEDATATYPES[i], stats->dataTypeSummary[i].totalKeys, stats->dataTypeSummary[i].totalMemory);
+		if(i != NUMBER_OF_NATIVE_DATATYPE-1)
+			fprintf (jsonOut, ",");
+	}
+
+	fprintf (jsonOut, " }}");
 	fprintf (jsonOut, " }\n");
 
-    printf("Total Memory = %llu\n", stats->totalMemory);
-    printf("Total Keys = %llu\n", stats->totalKeys);
-    for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
-        if (ENCODINGS[i] == NULL) continue;
+//    printf("Total Memory = %llu\n", stats->totalMemory);
+//    printf("Total Keys = %llu\n", stats->totalKeys);
 
-        printf("Memory for %s = %llu\n", ENCODINGS[i], stats->memoryByEncoding[i]);
-        printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
-    }
-
-    for(int i=0; i< TOP_KEYS_COUNT; i++){
-    	printf("Max Final memory %d==%llu\n", i, stats->topKeysByMemory[i].bytes);
-    }
+//    for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
+//        if (ENCODINGS[i] == NULL) continue;
+//
+//        printf("Memory for %s = %llu\n", ENCODINGS[i], stats->memoryByEncoding[i]);
+//        printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
+//    }
+//
+//    for(int i=0; i< TOP_KEYS_COUNT; i++){
+//    	printf("Max Final memory %d==%llu\n", i, stats->topKeysByMemory[i].bytes);
+//    }
+//
+//    for(int i=0; i< NUMBER_OF_NATIVE_DATATYPE; i++){
+//		printf("Datatype Count Memory %s==%llu %llu\n", NATIVEDATATYPES[i], stats->dataTypeSummary[i].totalKeys, stats->dataTypeSummary[i].totalMemory);
+//	}
 }
 
 int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defaultSnapshotTime) {
@@ -786,7 +823,8 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
         if (expiretime != -1) {
             expiretime = expiretime - snapshotTime;
         }
-        me.dataType = type;
+        me.encdType = type;
+        me.dataType = dataType;
         me.key = key;
         updateStats(&me, &stats);
         
