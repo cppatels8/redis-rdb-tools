@@ -814,7 +814,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
         /* TODO: sdscatrepr is a very slow function call. 
             Replace with a more optimal version
         */
-        //key = sdscatrepr(sdsempty(), key, sdslen(key));
+        key = sdscatrepr(sdsempty(), key, sdslen(key));
         rdbMemoryForObject(type, rdb, &me);
         getDataTypeAndEncoding(type, &dataType, &encoding);
         
