@@ -622,29 +622,112 @@ void initStats(Statistics *stats) {
     for(int i=0; i<NUMBER_OF_ENCODINGS; i++) {
         stats->memoryByEncoding[i] = stats->countKeysByEncoding[i] = 0;
     }
+
+    for(int i=0; i < NUMBER_OF_NATIVE_DATATYPE; i++){
+		stats->dataTypeSummary[i].totalMemory = stats->dataTypeSummary[i].totalKeys = 0;
+	}
+
+    for(int i=0; i < TOP_KEYS_COUNT; i++){
+		stats->topKeysByMemory[i].bytes = 0;
+	}
 }
+
+
+int findPositionOfRecord(MemoryEntry meArr[], MemoryEntry *me, int low, int high) {
+	if (meArr[high].bytes >= me->bytes)
+		return -1;
+
+	while (low <= high) {
+		int mid = (low + high)/2;
+		if (meArr[mid].bytes == me->bytes) {
+			return mid;
+		}
+
+		if(meArr[mid].bytes == 0 ) {
+			high=mid;
+		}
+
+		if (meArr[mid].bytes < me->bytes) {
+			high = mid-1;
+		} else {
+			low = mid+1;
+		}
+	}
+	return low;
+}
+
+void addTopKeysByMemory(MemoryEntry meArr[], MemoryEntry *me, int low, int high) {
+	int index = findPositionOfRecord(meArr, me, low, high);
+	if(index != -1) {
+		memmove(&(meArr[index+1]), &(meArr[index]), (TOP_KEYS_COUNT-index-1)*sizeof(MemoryEntry));
+		meArr[index] = *me;
+	}
+}
+
 void updateStats(MemoryEntry *me, Statistics *stats) {
+	int index = -1;
     stats->totalMemory += me->bytes;
     stats->totalKeys++;
 
-    stats->memoryByEncoding[me->dataType] += me->bytes;
-    stats->countKeysByEncoding[me->dataType]++;
+    stats->memoryByEncoding[me->encdType] += me->bytes;
+    stats->countKeysByEncoding[me->encdType]++;
+
+    if (strncmp(me->dataType, NATIVEDATATYPES[0], strlen(NATIVEDATATYPES[0])) == 0) {
+    	index = 0;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[1], strlen(NATIVEDATATYPES[1])) == 0) {
+		index = 1;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[2], strlen(NATIVEDATATYPES[2])) == 0) {
+		index = 2;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[3], strlen(NATIVEDATATYPES[3])) == 0) {
+		index = 3;
+	} else if (strncmp(me->dataType, NATIVEDATATYPES[4], strlen(NATIVEDATATYPES[4])) == 0) {
+		index = 4;
+	}
+
+	if(index != -1) {
+		stats->dataTypeSummary[index].totalMemory += me->bytes;
+		stats->dataTypeSummary[index].totalKeys += 1;
+	}
+
+    addTopKeysByMemory(stats->topKeysByMemory, me, 0, TOP_KEYS_COUNT-1);
 }
 
-void printStats(Statistics *stats) {
-    printf("Total Memory = %llu\n", stats->totalMemory);
-    printf("Total Keys = %llu\n", stats->totalKeys);
+void printStats(Statistics *stats, FILE *jsonOut) {
+	fprintf (jsonOut, "{ \"summary\" : {");
+	fprintf (jsonOut, " \"totalSizeInBytes\" : %llu,", stats->totalMemory);
+	fprintf (jsonOut, " \"generatedTime\" : \"%s\",", "------");
+	fprintf (jsonOut, " \"numKeys\" : %llu,", stats->totalKeys);
+	fprintf (jsonOut, " \"dataTypeStats\" : {");
 
-    for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
-        if (ENCODINGS[i] == NULL) continue;
+	for(int i=0; i< NUMBER_OF_NATIVE_DATATYPE; i++){
+		fprintf (jsonOut, " \"%s\" : { \"count\": %llu, \"totalSizeInBytes\" : %llu }", NATIVEDATATYPES[i], stats->dataTypeSummary[i].totalKeys, stats->dataTypeSummary[i].totalMemory);
+		if(i != NUMBER_OF_NATIVE_DATATYPE-1)
+			fprintf (jsonOut, ",");
+	}
 
-        printf("Memory for %s = %llu\n", ENCODINGS[i], stats->memoryByEncoding[i]);
-        printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
-    }
+	fprintf (jsonOut, " }}");
+	fprintf (jsonOut, " }\n");
 
+//    printf("Total Memory = %llu\n", stats->totalMemory);
+//    printf("Total Keys = %llu\n", stats->totalKeys);
+
+//    for(int i=0; i<NUMBER_OF_ENCODINGS; i++){
+//        if (ENCODINGS[i] == NULL) continue;
+//
+//        printf("Memory for %s = %llu\n", ENCODINGS[i], stats->memoryByEncoding[i]);
+//        printf("Keys for %s = %llu\n", ENCODINGS[i], stats->countKeysByEncoding[i]);
+//    }
+//
+//    for(int i=0; i< TOP_KEYS_COUNT; i++){
+//    	printf("Max Final memory %d==%llu\n", i, stats->topKeysByMemory[i].bytes);
+//    }
+//
+//    for(int i=0; i< NUMBER_OF_NATIVE_DATATYPE; i++){
+//		printf("Datatype Count Memory %s==%llu %llu\n", NATIVEDATATYPES[i], stats->dataTypeSummary[i].totalKeys, stats->dataTypeSummary[i].totalMemory);
+//	}
 }
 
-int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime) {
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defaultSnapshotTime) {
     uint64_t dbid;
     int type, rdbver;
     char buf[1024];
@@ -740,7 +823,9 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         if (expiretime != -1) {
             expiretime = expiretime - snapshotTime;
         }
-        me.dataType = type;
+        me.encdType = type;
+        me.dataType = dataType;
+        me.key = key;
         updateStats(&me, &stats);
         
         fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
@@ -748,7 +833,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime
         sdsfree(key);
     }
     
-    printStats(&stats);
+    printStats(&stats, jsonOut);
     return 0;
 
 eoferr: /* unexpected end of file is handled here with a fatal exit */
@@ -757,14 +842,15 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return -1; /* Just to avoid warning */
 }
 
-int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
-    FILE *fp, *out;
+int rdbMemoryAnalysis(char *rdbFile, char *csvFile, char *jsonFile) {
+    FILE *fp, *out, *jsonOut;
     int retval;
     uint64_t defaultSnapshotTime;
     struct stat rdbStat;
 
     if ((fp = fopen(rdbFile,"rb")) == NULL) return -1;
     if ((out = fopen(csvFile,"w")) == NULL) return -1;
+    if ((jsonOut = fopen(jsonFile,"w")) == NULL) return -1;
     
     /*
         Read file last modified timestamp as a simple heuristic for 
@@ -776,12 +862,13 @@ int rdbMemoryAnalysis(char *rdbFile, char *csvFile) {
     fstat(fileno(fp), &rdbStat);
     defaultSnapshotTime = rdbStat.st_mtime;
     
-    retval = rdbMemoryAnalysisInternal(fp, out, defaultSnapshotTime);
+    retval = rdbMemoryAnalysisInternal(fp, out, jsonOut, defaultSnapshotTime);
     fclose(fp);
     fclose(out);
+    fclose(jsonOut);
     return retval;
 }
 
 int main(int argc, char **argv) {
-    return rdbMemoryAnalysis("askubuntu.rdb", "askubuntu_memory.csv");
+	return rdbMemoryAnalysis(argv[1], argv[2], argv[3]);
 }

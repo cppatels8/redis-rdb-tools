@@ -51,6 +51,10 @@
                                the generating module being loaded. */
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 
+/* NOTE: WHEN ADDING NEW NATIVE DATA TYPE, UPDATE BELOW */
+#define NUMBER_OF_NATIVE_DATATYPE 5
+const char *NATIVEDATATYPES[NUMBER_OF_NATIVE_DATATYPE] = {"string", "list", "set", "zset", "hash"};
+
 /* Object types for encoded objects. */
 #define RDB_TYPE_HASH_ZIPMAP    9
 #define RDB_TYPE_LIST_ZIPLIST  10
@@ -118,23 +122,18 @@ const char *ENCODINGS[NUMBER_OF_ENCODINGS] = {"string", "linkedlist", "hashtable
 #define ZSKIPLIST_P 0.25
 #define SKIPLIST_OVERHEAD(size) (2*SIZEOF_POINTER + HASHTABLE_OVERHEAD(size) + (2*SIZEOF_POINTER + 16))
 #define SKIPLIST_ENTRY_OVERHEAD (HASHTABLE_ENTRY_OVERHEAD + 2*SIZEOF_LONG + 8 + (SIZEOF_POINTER + 8) * zsetRandomLevel())
-
-typedef struct Statistics {
-    uint64_t totalMemory;
-    uint64_t totalKeys;
-
-    uint64_t memoryByEncoding[NUMBER_OF_ENCODINGS];
-    uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
-    
-} Statistics;
+#define TOP_KEYS_COUNT 10
 
 typedef struct MemoryEntry {
 
-    int dataType;
+    int encdType;
+    const char* dataType;
     /*
         Memory used in bytes
     */
     uint64_t bytes;
+
+    char *key;
 
     /*
         For string, this is the length of the string
@@ -184,15 +183,32 @@ typedef struct MemoryEntry {
     uint64_t expiry;
 } MemoryEntry;
 
+typedef struct DataTypeSummary {
+	uint64_t totalMemory;
+	uint64_t totalKeys;
+} DataTypeSummary;
+
+typedef struct Statistics {
+    uint64_t totalMemory;
+    uint64_t totalKeys;
+
+    uint64_t memoryByEncoding[NUMBER_OF_ENCODINGS];
+    uint64_t countKeysByEncoding[NUMBER_OF_ENCODINGS];
+
+    MemoryEntry topKeysByMemory[TOP_KEYS_COUNT];
+    DataTypeSummary dataTypeSummary[NUMBER_OF_NATIVE_DATATYPE];
+
+} Statistics;
+
 int rdbLoadType(FILE *rdb);
 time_t rdbLoadTime(FILE *rdb);
 uint64_t rdbLoadLen(FILE *rdb, int *isencoded);
 int rdbLoadLenByRef(FILE *rdb, int *isencoded, uint64_t *lenptr);
 int rdbLoadObjectType(FILE *rdb);
-int rdbMemoryAnalysis(char *rdb, char *csv);
+int rdbMemoryAnalysis(char *rdb, char *csv, char *jsonFile);
 sds rdbLoadString(FILE *rdb, uint64_t *memory, uint64_t *savingsIfCompressed);
 int rdbLoadBinaryDoubleValue(FILE *rdb, double *val);
 int rdbLoadBinaryFloatValue(FILE *rdb, float *val);
-int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, uint64_t defaultSnapshotTime);
+int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defaultSnapshotTime);
 
 #endif
