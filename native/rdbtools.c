@@ -474,6 +474,9 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
     me->savingsIfIntset = 0;
     me->savingsIfHashToList = 0;
     me->savingsIfHashHadSmallFieldNames = 0;
+    me->savingsIfLinkedlistToQuicklist=0;
+    me->serializer = 0;
+    me->compressionAlgorithm = 0;
 
     /* 
     e stands for "element"
@@ -513,7 +516,8 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
                 me->lenLargestElement = eLen;
             }
         }
-
+        /*TODO: refine heuristic for ziplist overhead and quicklist overhead*/
+        me->savingsIfLinkedlistToQuicklist = me->bytes - (sumLengthOfFields + (me->length/512 * 20));
         me->savingsIfZiplist = me->bytes - sumLengthOfFields;
 
     } else if (rdbtype == RDB_TYPE_SET) {
@@ -615,7 +619,12 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
             /*
             TODO: this assumes the new fields will have an average length of 5 bytes
             */
-            me->savingsIfHashHadSmallFieldNames = sumLengthOfFields - me->length * 5;
+            if (sumLengthOfFields > me->length * 15) {
+                me->savingsIfHashHadSmallFieldNames = sumLengthOfFields - me->length * 5;
+            }
+
+            /*TODO: refine this metric based on linkedlist, quicklist or ziplist*/
+            me->savingsIfHashToList = sumLengthOfValues + (me->length/512 * 20);
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -802,7 +811,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
     rdbver = atoi(buf+5);
 
     /* Print CSV Header */
-    fprintf(csv, "\"database\",\"type\",\"key\",\"size_in_bytes\",\"encoding\",\"num_elements\",\"len_largest_element\",\"expiry\",\"savings_if_compressed\",\"savings_if_quicklist_is_compressed\",\"savings_if_ziplist\",\"savings_if_intset\",\"savings_if_hash_to_list\",\"savings_if_hash_had_small_field_names\"\n");
+    fprintf(csv, "\"database\",\"type\",\"key\",\"size_in_bytes\",\"encoding\",\"num_elements\",\"len_largest_element\",\"expiry\",\"serializer\",\"compression_algorithm\",\"savings_if_compressed\",\"savings_if_quicklist_is_compressed\",\"savings_if_ziplist\",\"savings_if_intset\",\"savings_if_hash_to_list\",\"savings_if_hash_had_small_field_names\",\"savings_if_linkedlist_to_quicklist\"\n");
 
     while(1) {
         expiretime = -1;
@@ -875,11 +884,13 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
         me.key = key;
         updateStats(&me, &stats);
         
-        fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\"\n", 
+        fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%d\",\"%d\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\"\n", 
             dbid, dataType, key, 
-            me.bytes, encoding, me.length, me.lenLargestElement, expiretime, me.savingsIfCompressed,
+            me.bytes, encoding, me.length, me.lenLargestElement, expiretime, 
+            me.serializer, me.compressionAlgorithm, me.savingsIfCompressed,
             me.savingsIfQuicklistIsCompressed, me.savingsIfZiplist, me.savingsIfIntset,
-            me.savingsIfHashToList, me.savingsIfHashHadSmallFieldNames
+            me.savingsIfHashToList, me.savingsIfHashHadSmallFieldNames,
+            me.savingsIfLinkedlistToQuicklist
             );
         sdsfree(key);
     }

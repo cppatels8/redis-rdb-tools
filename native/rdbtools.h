@@ -169,11 +169,15 @@ typedef struct MemoryEntry {
 
     /*
     The serialization algorithm used to store values in redis
-    Can be JSON, XML, JAVA_SERIALIZED_OBJECT, PYTHON_PICKLE_OBJECT,
+    Can be UNKNOWN, JSON, XML, JAVA_SERIALIZED_OBJECT, PYTHON_PICKLE_OBJECT,
     PHP_SERIALIZE,
     */
     int serializer;
 
+    /*
+    The compression algorithm, if used
+    Can be UNKNOWN, GZIP, ZIP, SNAPPY, LZF, etc.
+    */
     int compressionAlgorithm;
     
     /*
@@ -190,6 +194,15 @@ typedef struct MemoryEntry {
         Fr lists, we sum the memory saved if each element were to be compressed.
     */
     uint64_t savingsIfCompressed;
+
+    /*
+    Older versions of redis used linkedlists, newer versions use quicklist
+    linkedlists use a lot more memory than quicklists
+    If the user upgrades redis-server, linkedlists are auto-converted to quicklists
+    This value tells the user the potential savings that can be achieved 
+    before actually upgrading.
+    */
+    uint64_t savingsIfLinkedlistToQuicklist;
 
     /*
     Savings if quicklist were compressed to a depth = 1
