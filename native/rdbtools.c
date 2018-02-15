@@ -20,8 +20,6 @@
 
 #define rdbExitReportCorruptRDB(...) rdbCheckThenExit(__LINE__,__VA_ARGS__)
 
-extern int rdbCheckMode;
-
 void rdbCheckThenExit(int linenum, char *reason, ...) {
     va_list ap;
     char msg[1024];
