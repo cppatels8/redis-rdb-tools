@@ -150,21 +150,6 @@ typedef struct MemoryEntry {
     uint64_t lenLargestElement;
 
     /*
-        This is a rough indicator of how much memory would be saved 
-        if client side compression was used before saving values in redis.
-        The actual compression algorithm is LZF.    
-
-        For strings, this directly maps to the bytes saved if the value is compressed
-        For hashes, we ignore field names, 
-            and sum the memory saved if each value would be compressed.
-
-        For sets, we sum the memory saved if each member were to be compressed
-        For sortedsets, we sum the memory saved if each member were to be compressed
-        Fr lists, we sum the memory saved if each element were to be compressed.
-    */
-    uint64_t savingsIfCompressed;
-
-    /*
         This is the relative expiry expressed in milliseconds
         The RDB file has the expiry in absolute timestamp. 
         We convert it into a relative timestamp by using 
@@ -181,6 +166,82 @@ typedef struct MemoryEntry {
             so use it in the worst case
     */
     uint64_t expiry;
+
+    /*
+    The serialization algorithm used to store values in redis
+    Can be UNKNOWN, JSON, XML, JAVA_SERIALIZED_OBJECT, PYTHON_PICKLE_OBJECT,
+    PHP_SERIALIZE,
+    */
+    int serializer;
+
+    /*
+    The compression algorithm, if used
+    Can be UNKNOWN, GZIP, ZIP, SNAPPY, LZF, etc.
+    */
+    int compressionAlgorithm;
+    
+    /*
+        This is a rough indicator of how much memory would be saved 
+        if client side compression was used before saving values in redis.
+        The actual compression algorithm is LZF.    
+
+        For strings, this directly maps to the bytes saved if the value is compressed
+        For hashes, we ignore field names, 
+            and sum the memory saved if each value would be compressed.
+
+        For sets, we sum the memory saved if each member were to be compressed
+        For sortedsets, we sum the memory saved if each member were to be compressed
+        Fr lists, we sum the memory saved if each element were to be compressed.
+    */
+    uint64_t savingsIfCompressed;
+
+    /*
+    Older versions of redis used linkedlists, newer versions use quicklist
+    linkedlists use a lot more memory than quicklists
+    If the user upgrades redis-server, linkedlists are auto-converted to quicklists
+    This value tells the user the potential savings that can be achieved 
+    before actually upgrading.
+    */
+    uint64_t savingsIfLinkedlistToQuicklist;
+
+    /*
+    Savings if quicklist were compressed to a depth = 1
+    */
+    uint64_t savingsIfQuicklistIsCompressed;
+
+    /*
+    If the data type is hash in hashtable encoding, 
+    list in linkedlist encoding, or sorted set in skiplist encoding, 
+    this column will store the savings if it 
+    were converted to ziplist encoding.
+    */
+    uint64_t savingsIfZiplist;
+
+    /*
+    If the data type is a set in hashtable encoding,
+    and the size of the set is within certain bounds,
+    and if the hashtable has only integers,
+    then it could potentially be converted to an intset (by adjusting set-max-intset-entries)
+    In this case, this field will be set to 1, otherwise it will be 0
+    */
+    uint64_t savingsIfIntset;
+
+    /*
+    If the datatype is a hash with few fields (<15), 
+    but there are a large number of such hashes, 
+    and the field names are relatively static (i.e. each hash the same fields) -
+    then you can convert the hash to a list, 
+    and maintain a mapping from fieldname to index 
+    */
+    uint64_t savingsIfHashToList;
+
+    /*
+    If the datatype is a hash, and it has field names 
+    that are bigger than 12 bytes, how much memory would we save 
+    if each field name was made shorter to 5 bytes on average?
+    */
+    uint64_t savingsIfHashHadSmallFieldNames;
+    
 } MemoryEntry;
 
 typedef struct DataTypeSummary {

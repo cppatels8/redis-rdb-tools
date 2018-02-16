@@ -20,8 +20,6 @@
 
 #define rdbExitReportCorruptRDB(...) rdbCheckThenExit(__LINE__,__VA_ARGS__)
 
-extern int rdbCheckMode;
-
 void rdbCheckThenExit(int linenum, char *reason, ...) {
     va_list ap;
     char msg[1024];
@@ -471,14 +469,27 @@ uint64_t topLevelObjectOverhead(uint64_t memoryForKey, int hasExpiry) {
 int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
 
     me->bytes = me->lenLargestElement = me->savingsIfCompressed = me->length = 0;
+    me->savingsIfQuicklistIsCompressed = 0;
+    me->savingsIfZiplist = 0;
+    me->savingsIfIntset = 0;
+    me->savingsIfHashToList = 0;
+    me->savingsIfHashHadSmallFieldNames = 0;
+    me->savingsIfLinkedlistToQuicklist=0;
+    me->serializer = 0;
+    me->compressionAlgorithm = 0;
+
     /* 
-        e stands for "element"
-        These variables are similar to the ones above, 
-        except they are for elements within this object
+    e stands for "element"
+    These variables are similar to the ones above, 
+    except they are for elements within this object
     */
     uint64_t eLen, eMemory, eSavingsIfCompressed;
     
     uint64_t numElements = 0;
+
+    uint64_t sumLengthOfFields = 0;
+    uint64_t sumLengthOfValues = 0;
+
     /*
         For ziplist, to find out the number of elements
         we load the first 10 bytes of the header
@@ -498,12 +509,16 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
         /* skip every single element of the list */
         while(numElements--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
+            sumLengthOfFields += eLen;
             me->bytes += eMemory;
             me->savingsIfCompressed += eSavingsIfCompressed;
             if (eLen > me->lenLargestElement) {
                 me->lenLargestElement = eLen;
             }
         }
+        /*TODO: refine heuristic for ziplist overhead and quicklist overhead*/
+        me->savingsIfLinkedlistToQuicklist = me->bytes - (sumLengthOfFields + (me->length/512 * 20));
+        me->savingsIfZiplist = me->bytes - sumLengthOfFields;
 
     } else if (rdbtype == RDB_TYPE_SET) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -511,6 +526,15 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
         me->length = numElements;
         me->bytes += HASHTABLE_OVERHEAD(numElements);
         me->bytes += HASHTABLE_ENTRY_OVERHEAD * numElements;
+        
+        /*
+        
+        TODO: decide if its int16, int32 or int64
+        For not, assume it's it int32, a reasonable expectation
+
+        TODO: add intset overheads
+        */
+        me->savingsIfIntset = me->bytes - numElements * 4;
 
         unsigned int i;
         /* Load every single element of the set */
@@ -540,19 +564,27 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
             me->bytes += eMemory;
             me->savingsIfCompressed += eSavingsIfCompressed;
+            sumLengthOfFields += eLen;
             if (eLen > me->lenLargestElement) {
                 me->lenLargestElement = eLen;
             }
 
             if (rdbtype == RDB_TYPE_ZSET_2) {
                 rdbSkip(rdb,sizeof(double));
+                sumLengthOfValues += 8;
             } else {
                 /*
                 TODO: implement a skip function
                 For now, we just read the double and ignore it
                 */
                 rdbLoadDoubleValue(rdb,&score);
+                sumLengthOfValues += 4;
             }
+
+            /*
+            TODO: add ziplist overheads
+            */
+            me->savingsIfZiplist = me->bytes - (sumLengthOfValues + sumLengthOfFields);
         }
     } else if (rdbtype == RDB_TYPE_HASH) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -566,6 +598,8 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
             me->bytes += eMemory;
             me->savingsIfCompressed += eSavingsIfCompressed;
+            me->length = eLen;
+            sumLengthOfFields += eLen;
             if (eLen > me->lenLargestElement) {
                 me->lenLargestElement = eLen;
             }
@@ -574,9 +608,23 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, NULL);
             me->bytes += eMemory;
             me->savingsIfCompressed += eSavingsIfCompressed;
+            sumLengthOfValues += eLen;
             if (eLen > me->lenLargestElement) {
                 me->lenLargestElement = eLen;
             }
+            /*
+            TODO: add ziplist overheads
+            */
+            me->savingsIfZiplist = me->bytes - (sumLengthOfValues + sumLengthOfFields);
+            /*
+            TODO: this assumes the new fields will have an average length of 5 bytes
+            */
+            if (sumLengthOfFields > me->length * 15) {
+                me->savingsIfHashHadSmallFieldNames = sumLengthOfFields - me->length * 5;
+            }
+
+            /*TODO: refine this metric based on linkedlist, quicklist or ziplist*/
+            me->savingsIfHashToList = sumLengthOfValues + (me->length/512 * 20);
         }
     } else if (rdbtype == RDB_TYPE_LIST_QUICKLIST) {
         if ((numElements = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return -1;
@@ -586,10 +634,18 @@ int rdbMemoryForObject(int rdbtype, FILE *rdb, MemoryEntry *me) {
         /* Don't compute maxLengthOfElement, use the default*/
         me->lenLargestElement = 512;
 
-        while (numElements--) {
+        unsigned int i = numElements;
+        while (i--) {
             rdbLoadStringMetadata(rdb, &eLen, &eMemory, &eSavingsIfCompressed, zipListHeader);
             me->bytes += eMemory;
-            me->savingsIfCompressed += eSavingsIfCompressed;
+            
+            /*
+            If compression is enabled on a quicklist, the head and tail nodes
+            will not be compressed. So we skip head and tail nodes.
+            */
+            if (i != numElements && i != 0) {
+                me->savingsIfQuicklistIsCompressed += eSavingsIfCompressed;
+            }
 
             /*
              ziplist header, if treated as uint16_t, 
@@ -755,7 +811,7 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
     rdbver = atoi(buf+5);
 
     /* Print CSV Header */
-    fprintf(csv, "\"database\",\"type\",\"key\",\"size_in_bytes\",\"encoding\",\"num_elements\",\"len_largest_element\",\"expiry\",\"savings_if_compressed\"\n");
+    fprintf(csv, "\"database\",\"type\",\"key\",\"size_in_bytes\",\"encoding\",\"num_elements\",\"len_largest_element\",\"expiry\",\"serializer\",\"compression_algorithm\",\"savings_if_compressed\",\"savings_if_quicklist_is_compressed\",\"savings_if_ziplist\",\"savings_if_intset\",\"savings_if_hash_to_list\",\"savings_if_hash_had_small_field_names\",\"savings_if_linkedlist_to_quicklist\"\n");
 
     while(1) {
         expiretime = -1;
@@ -828,8 +884,14 @@ int rdbMemoryAnalysisInternal(FILE *rdb, FILE *csv, FILE *jsonOut, uint64_t defa
         me.key = key;
         updateStats(&me, &stats);
         
-        fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%llu\"\n", dbid, dataType, key, 
-            me.bytes, encoding, me.length, me.lenLargestElement, expiretime, me.savingsIfCompressed);
+        fprintf(csv, "\"%llu\",\"%s\",%s,\"%llu\",\"%s\",\"%llu\",\"%llu\",\"%lld\",\"%d\",\"%d\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\",\"%llu\"\n", 
+            dbid, dataType, key, 
+            me.bytes, encoding, me.length, me.lenLargestElement, expiretime, 
+            me.serializer, me.compressionAlgorithm, me.savingsIfCompressed,
+            me.savingsIfQuicklistIsCompressed, me.savingsIfZiplist, me.savingsIfIntset,
+            me.savingsIfHashToList, me.savingsIfHashHadSmallFieldNames,
+            me.savingsIfLinkedlistToQuicklist
+            );
         sdsfree(key);
     }
     
