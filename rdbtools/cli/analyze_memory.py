@@ -1,12 +1,14 @@
 import requests
 import ctypes
 import json
+import gzip
 import os
 import sys
 import uuid
 
 C_LIBRARY_PATH = os.getcwd() + "/librdb.so"
 CSV_OUTPUT_PATH = os.getcwd() + "/dump.csv"
+GZIP_OUTPUT_PATH = os.getcwd() + "/dump.gz"
 JSON_OUTPUT_PATH = os.getcwd() + "/dump.json"
 APP_ENDPOINT = "http://127.0.0.1:8000"
 AWS_S3_ENDPOINT = "https://rdbtools-dev.s3.amazonaws.com/"
@@ -39,14 +41,24 @@ def memory_analyzer(snapshot_path):
     resp = request_client("post", SNAPSHOT_SUMMARY_ENDPOINT.format(sanpshot_id), data=json.dumps(summary), headers=headers)
     print "Done.\n"
   
+    # gzip the csv output file
+    gzip_csv_file()
+  
     # Get s3 signed URL
     print "Uploading snapshot csv file to rdbtools.com ......."
-    resp = request_client("get", UPLOAD_CSV_ENDPOINT.format(sanpshot_id, snapshot_path))
+    resp = request_client("get", UPLOAD_CSV_ENDPOINT.format(sanpshot_id, GZIP_OUTPUT_PATH))
     data = resp.json()
-  
-    #uploads file to s3
+
+    # uploads file to s3
     upload_file_to_s3(data)
     print "Done.\n"
+
+
+def gzip_csv_file():
+    # Compresses the CSV output file to gzip format
+    with open(CSV_OUTPUT_PATH, "rb") as file_in:
+        with gzip.open(GZIP_OUTPUT_PATH, "wb") as file_out:
+            file_out.writelines(file_in)
 
 
 def upload_file_to_s3(data):
@@ -55,6 +67,7 @@ def upload_file_to_s3(data):
 
 
 def _is_snapshot_path_valid(path):
+    # validates if snapshot exists at the given path or not
     return os.path.exists(path)
 
 
@@ -75,4 +88,6 @@ def request_client(method, url, data=None, headers=None, files=None):
 
 
 if __name__ == '__main__':
+    # It takes one argument path of your snapshot
     memory_analyzer(sys.argv[1])
+
