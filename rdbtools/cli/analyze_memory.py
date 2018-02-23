@@ -7,9 +7,9 @@ import sys
 import uuid
 
 C_LIBRARY_PATH = os.getcwd() + "/librdb.so"
-CSV_OUTPUT_PATH = os.getcwd() + "/dump.csv"
-GZIP_OUTPUT_PATH = os.getcwd() + "/dump.gz"
-JSON_OUTPUT_PATH = os.getcwd() + "/dump.json"
+CSV_OUTPUT_PATH = os.getcwd() + "/{}.csv"
+GZIP_OUTPUT_PATH = os.getcwd() + "/{}.gz"
+JSON_OUTPUT_PATH = os.getcwd() + "/{}.json"
 APP_ENDPOINT = "http://127.0.0.1:8000"
 AWS_S3_ENDPOINT = "https://rdbtools-dev.s3.amazonaws.com/"
 SNAPSHOT_SUMMARY_ENDPOINT = APP_ENDPOINT + "/api/snapshot/{}/summary/"
@@ -23,6 +23,11 @@ rdblib = ctypes.CDLL(C_LIBRARY_PATH)
 
 def memory_analyzer(snapshot_path):
     sanpshot_id = str(uuid.uuid4())
+
+    global CSV_OUTPUT_PATH, GZIP_OUTPUT_PATH, JSON_OUTPUT_PATH
+    CSV_OUTPUT_PATH = CSV_OUTPUT_PATH.format(sanpshot_id)
+    GZIP_OUTPUT_PATH = GZIP_OUTPUT_PATH.format(sanpshot_id)
+    JSON_OUTPUT_PATH = JSON_OUTPUT_PATH.format(sanpshot_id)
 
     if not _is_snapshot_path_valid(snapshot_path):
         raise Exception("Snapshot path not valid.")
